@@ -1,0 +1,32 @@
+{
+  "profiles": [
+    {
+      "id": "gear360_2017",
+      "name": "Samsung Gear 360 (2017) — SM-R210",
+      "transport": "http_live_preview",
+      "defaults": {
+        "host": "192.168.43.1",
+        "port": 7679,
+        "stream_path": "/livestream_high.avi"
+      },
+      "stream": {
+        "container": "gear360_chunks",
+        "codecs": { "1": "hevc", "0": "h264" },
+        "keyframe_bytes": [64, 38]
+      },
+      "optics": {
+        "layout": "side_by_side",
+        "fisheye_fov_deg": 195,
+        "lens0_azimuth_deg": 0,
+        "lens1_azimuth_deg": 180,
+        "radius_factor": 1.0,
+        "center_offset_x": 0.0,
+        "swap_lenses": false,
+        "roll_deg": 0,
+        "equirect_width": 2048
+      },
+      "verified_firmware": ["R210GLU0ARB2"],
+      "notes": "Live preview endpoint returns HTTP 206 with video/x-avi custom chunked container (TTTS/VID0/LIST/movi/00VD)."
+    }
+  ]
+}

@@ -1,0 +1,6 @@
+# Optional AI extras. Base Gear360 Hub works without these.
+# Face Recognition (offline, uses dlib):
+#   pip install -r requirements-ai.txt
+face_recognition>=1.3,<2 ; python_version < "3.13"
+# Future: YOLO person detection backend (heavy). Keep commented unless needed.
+# ultralytics>=8.3,<9

@@ -1,7 +1,45 @@
-.venv/
+# --- Gear360 Hub .gitignore ---
+# Python
 __pycache__/
-*.pyc
-logs/
-*.bin
-*.avi
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+*.egg-info/
+
+# Environment / secrets
 .env
+.env.*
+!.env.example
+
+# Local runtime data (never commit personal data / media / db)
+data/
+recordings/
+photos/
+logs/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Bundled binaries (user downloads FFmpeg here)
+runtime/ffmpeg/*
+!runtime/ffmpeg/.gitkeep
+
+# Debug captures
+debug/
+*.avi
+*.h264
+*.hevc
+!tests/fixtures/*.bin
+
+# OS / editor
+Thumbs.db
+.DS_Store
+.idea/
+.vscode/
+
+# local dev logs
+dev.log
+*.log
+!logs/.gitkeep
