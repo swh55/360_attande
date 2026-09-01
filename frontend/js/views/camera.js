@@ -1,0 +1,115 @@
+// Camera view: status details, connect/disconnect, test, profiles.
+import { t, fmt } from "../i18n.js";
+import { api, feed } from "../api.js";
+import { el, toast } from "../app.js";
+
+export async function renderCamera(container) {
+  const [cam, profiles] = await Promise.all([api.camStatus(), api.cameraProfiles()]);
+  const profileList = profiles.profiles || [];
+
+  container.innerHTML = `
+  <div class="grid cols-2" style="align-items:start">
+    <div style="display:flex; flex-direction:column; gap:16px">
+      <div class="card">
+        <h3>📷 ${t("cam.title")} <span class="grow"></span><span id="camStateBadge"></span></h3>
+        <div class="btn-row" style="margin-bottom:14px">
+          <button class="btn primary" id="btnConnect">🔗 ${t("cam.connect")}</button>
+          <button class="btn" id="btnDisconnect">⛔ ${t("cam.disconnect")}</button>
+          <button class="btn" id="btnTest">🧪 ${t("cam.test")}</button>
+        </div>
+        <div class="kv"><span>${t("cam.ip")}</span><b>${cam.config?.host}</b></div>
+        <div class="kv"><span>${t("cam.port")}</span><b>${cam.config?.port}</b></div>
+        <div class="kv"><span>${t("cam.stream_url")}</span><b style="font-size:11.5px; word-break:break-all">${cam.stream_url}</b></div>
+        <div class="kv"><span>${t("cam.reachable")}</span><b id="camReach">—</b></div>
+        <div class="kv"><span>${t("cam.latency")}</span><b id="camLatency">—</b></div>
+        <div class="kv"><span>${t("cam.uptime")}</span><b id="camUptime">—</b></div>
+        <div class="kv"><span>${t("cam.last_frame")}</span><b id="camLastFrame">—</b></div>
+        <div class="kv"><span>${t("cam.errors")}</span><b id="camErrors">0</b></div>
+        <div class="kv"><span>${t("cam.reconnects")}</span><b id="camReconn">0</b></div>
+        <div class="kv"><span>${t("cam.codec")}</span><b id="camCodec">—</b></div>
+        <div class="kv"><span>${t("cam.resolution")}</span><b id="camRes">—</b></div>
+      </div>
+      <div class="card" id="testResult" hidden><h3>🧪 ${t("cam.test")}</h3><div id="testBody"></div></div>
+    </div>
+
+    <div style="display:flex; flex-direction:column; gap:16px">
+      <div class="card">
+        <h3>📐 ${t("cam.profiles")}</h3>
+        ${profileList.map((p) => `
+          <div class="kv"><span><b>${p.name}</b><br>
+            <small style="color:var(--text-2)">${p.host}:${p.port}${p.stream_path}</small></span>
+            <span class="badge ${cam.config?.profile === p.id ? "ok" : "muted"}">${p.id}</span></div>`).join("")}
+        <p style="color:var(--text-2); font-size:12px; line-height:1.6">
+          ${profileList[0]?.notes || ""}</p>
+      </div>
+      <div class="card">
+        <h3>🗒 Camera log</h3>
+        <pre id="camLog" style="font-size:11px; max-height:260px; overflow-y:auto; white-space:pre-wrap; color:var(--text-2)"></pre>
+      </div>
+    </div>
+  </div>`;
+
+  const stateBadge = container.querySelector("#camStateBadge");
+  const setState = (s, demo) => {
+    stateBadge.innerHTML = `<span class="badge ${s === "streaming" ? "ok" : s === "error" ? "err" : s === "disconnected" || demo ? "muted" : "warn"}">
+      ${demo ? t("state.demo") : t("state." + s, s)}</span>`;
+  };
+  setState(cam.state, false);
+
+  container.querySelector("#btnConnect").onclick = async () => {
+    try { await api.connect(); toast("🔗 …", "ok"); }
+    catch (err) { toast(err.message, "err"); }
+  };
+  container.querySelector("#btnDisconnect").onclick = async () => {
+    await api.disconnect(); toast("⛔", "ok");
+  };
+  container.querySelector("#btnTest").onclick = async () => {
+    const box = container.querySelector("#testResult");
+    const body = container.querySelector("#testBody");
+    box.hidden = false;
+    body.textContent = "…";
+    try {
+      const r = await api.testCam();
+      body.innerHTML = `
+        <div class="kv"><span>TCP ${r.host}:${r.port}</span><b>${r.tcp ? "✓" : "✕"}</b></div>
+        ${r.latency_ms ? `<div class="kv"><span>${t("cam.latency")}</span><b>${r.latency_ms} ms</b></div>` : ""}
+        <div class="kv"><span>HTTP stream</span><b>${r.http ? "✓ " + r.http_status : "✕"}</b></div>
+        ${r.content_type ? `<div class="kv"><span>Content-Type</span><b>${r.content_type}</b></div>` : ""}
+        ${r.bytes_received ? `<div class="kv"><span>Bytes received</span><b>${fmt.num(r.bytes_received)}</b></div>` : ""}
+        ${r.error ? `<div class="kv"><span>Error</span><b style="color:var(--red)">${r.error}</b></div>` : ""}`;
+    } catch (err) { body.textContent = err.message; }
+  };
+
+  // live updates
+  const unsub = feed.on("state", (msg) => {
+    const cam2 = msg.camera || {};
+    setState(cam2.state, msg.mode === "demo");
+    container.querySelector("#camReach").textContent =
+      cam2.camera_reachable ? t("cam.yes") : t("cam.no");
+    container.querySelector("#camLatency").textContent =
+      cam2.latency_ms != null ? cam2.latency_ms + " ms" : "—";
+    container.querySelector("#camUptime").textContent =
+      cam2.uptime_sec ? fmt.dur(cam2.uptime_sec) : "—";
+    container.querySelector("#camLastFrame").textContent =
+      cam2.last_frame_age != null ? cam2.last_frame_age + " s" : t("cam.never");
+    container.querySelector("#camErrors").textContent = fmt.num(cam2.error_count || 0);
+    container.querySelector("#camReconn").textContent = fmt.num(cam2.reconnects || 0);
+    container.querySelector("#camCodec").textContent = cam2.stream?.codec || "—";
+    container.querySelector("#camRes").textContent =
+      cam2.stream?.width ? `${cam2.stream.width}×${cam2.stream.height}` : "—";
+  });
+
+  // camera log tail
+  const logPre = container.querySelector("#camLog");
+  const loadLog = async () => {
+    try {
+      const r = await api.get("/api/system/logs?domain=camera&tail=40");
+      logPre.textContent = r.lines.join("\n") || "—";
+      logPre.scrollTop = logPre.scrollHeight;
+    } catch {}
+  };
+  loadLog();
+  const logTimer = setInterval(loadLog, 4000);
+
+  return () => { unsub(); clearInterval(logTimer); };
+}
