@@ -174,6 +174,7 @@ class StreamPipeline:
         self.decoded_frames = 0
         self.error: Optional[str] = None
         self.last_frame_wall = 0.0
+        self.first_frame_wall = 0.0
         self.http_ok = False
         self.http_status: Optional[int] = None
         self.http_content_type = ""
@@ -192,6 +193,8 @@ class StreamPipeline:
         self._fps_window: deque[float] = deque(maxlen=120)
         self._bytes_window: deque[tuple] = deque(maxlen=240)
         self._last_sample = 0.0
+        self._last_frame_log = 0.0
+        self._parser_reset_pending = False
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._cfg: dict = {}
@@ -304,6 +307,12 @@ class StreamPipeline:
         self.last_transport_event = {"type": etype, "ts": round(time.time(), 3), **detail}
         if etype == "connect":
             self.transport_status = "connecting"
+            # every new HTTP response restarts the container from byte 0 (the
+            # camera always answers Range: bytes=0- with a fresh header zone);
+            # a parser that already consumed bytes must be reset or it stays
+            # desynced inside the old movi zone forever
+            if self.parser is not None and (self.parser.bytes_seen or self.parser.started):
+                self._parser_reset_pending = True
         elif etype == "headers":
             self.transport_status = "headers"
         elif etype == "data":
@@ -338,6 +347,10 @@ class StreamPipeline:
                     wait = (self.first_byte_wall - self.connect_wall) if self.connect_wall else 0.0
                     LOG.info("STREAM: first stream bytes after %.2fs", wait)
                 self.last_chunk_wall = time.time()
+                if self._parser_reset_pending:
+                    self._parser_reset_pending = False
+                    parser.reset()
+                    LOG.info("STREAM: parser reset — fresh container after transport reconnect")
                 frames = parser.feed(chunk)
 
                 now = time.time()
@@ -379,7 +392,20 @@ class StreamPipeline:
                     for image in images:
                         self.decoded_frames += 1
                         self._fps_window.append(time.time())
-                        self.last_frame_wall = time.time()
+                        now = time.time()
+                        if not self.first_frame_wall:
+                            self.first_frame_wall = now
+                            LOG.info(
+                                "FRAME: first frame decoded %dx%d — %.1fs after stream start "
+                                "(parser: %d bytes, %d chunks, %d resyncs)",
+                                image.shape[1], image.shape[0],
+                                now - (self.first_byte_wall or now),
+                                parser.bytes_seen, parser.chunks_seen, parser.resyncs)
+                        elif now - self._last_frame_log >= 10.0:
+                            self._last_frame_log = now
+                            LOG.info("FRAME: %d decoded total, %.1f fps",
+                                     self.decoded_frames, self.fps)
+                        self.last_frame_wall = now
                         self.bus.publish(Frame(
                             image=image, timestamp=frame.timestamp,
                             keyframe=frame.keyframe, source="live",

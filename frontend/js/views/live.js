@@ -17,6 +17,12 @@ export async function renderLive(container, params) {
       <div class="viewer-wrap" style="min-height:560px">
         <canvas id="liveCanvas"></canvas>
         <div class="viewer-tag" id="liveTag"></div>
+        <div class="live-overlay" id="liveOverlay" hidden>
+          <div class="lo-box">
+            <div class="lo-title"><span class="lo-dot"></span><span id="loTitle"></span></div>
+            <div class="lo-reason" id="loReason"></div>
+          </div>
+        </div>
         <div class="viewer-ctl">
           <select id="projSel" title="${t("live.projection")}">
             ${PROJECTIONS.map((p) => `<option value="${p}">${t("proj." + p)}</option>`).join("")}
@@ -219,11 +225,32 @@ export async function renderLive(container, params) {
     const srcInfo = container.querySelector("#srcInfo");
     if (msg.mode === "live") {
       const cam = msg.camera || {};
-      srcInfo.innerHTML = `${cam.stream?.codec || "—"} · ${cam.stream?.width || "?"}×${cam.stream?.height || "?"}<br>${cam.stream_url || ""}`;
+      const dec = cam.fps !== undefined ? `decoder ${cam.fps} fps` : "";
+      const age = cam.last_frame_age !== undefined && cam.last_frame_age !== null
+        ? ` · last frame ${cam.last_frame_age}s ago` : "";
+      srcInfo.innerHTML = `${cam.stream?.codec || "—"} · ${cam.stream?.width || "?"}×${cam.stream?.height || "?"}`
+        + `<br>${cam.stream_url || ""}`
+        + `<br><small>${esc(String(cam.decoded_frames ?? 0))} decoded frames · ${esc(dec)}${esc(age)}</small>`;
     } else if (msg.mode === "demo") {
       srcInfo.textContent = "Demo source — 1280×720 · 15 FPS";
     } else {
       srcInfo.textContent = t("live.none");
+    }
+    // frame_ready gating: the viewer canvas stays covered until real frames
+    // flow (or the pipeline errors — then show the reason, never fake live)
+    const ov = container.querySelector("#liveOverlay");
+    if (ov && !playbackId) {
+      const pv = msg.pipeline || {};
+      const live = msg.mode === "live";
+      const ready = pv.state === "READY";
+      if (live && !ready) {
+        ov.hidden = false;
+        container.querySelector("#loTitle").textContent = pv.state || "CONNECTING";
+        container.querySelector("#loReason").textContent =
+          pv.reason || "Waiting for the first decoded camera frame…";
+      } else {
+        ov.hidden = true;
+      }
     }
     const lb = container.querySelector("#liveLayers");
     if (lb) {

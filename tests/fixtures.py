@@ -1,10 +1,14 @@
 """Shared test fixtures: synthetic Gear360 stream builder + temp DB.
 
-The synthetic builder mirrors the real SM-R210 container structure:
-  TTTS -> VID0 -> AUD0 -> LIST/movi -> 00VD/00AU chunk run
-with field offsets VERIFIED against TecCheck/Gear360App Extractor.kt and real
-camera captures (see app/stream/parser.py module docstring):
-  VID0: codec@16 scale@32 subTag("VD00")@36 fpsNum@44 fpsDen@48 width@76 height@80
+The synthetic builder mirrors the REAL SM-R210 container structure — every
+record convention verified against TecCheck/Gear360App Extractor.kt AND the
+real capture (DG-20260903-001):
+  TTTS:  FIXED 12-byte structure (tag + size + type); real camera sends size=0
+  VID0:  size field is SELF-INCLUSIVE (record = 4+size; payload = size-4)
+         with field offsets codec@16 scale@32 subTag("VD00")@36 fpsNum@44
+         fpsDen@48 width@76 height@80 (relative to the byte after tag+size)
+  AUD0:  same self-inclusive convention; subTag "AU00" at payload +12
+  LIST/movi + 00VD/00AU media chunks: tag(4) + size(4) + ts(8) + payload(size)
   00VD payload: 00 00 00 01 + access unit + 5-byte trailer (payload[4] = first
   NAL header byte; 0x26/38 = HEVC IDR -> keyframe).
 """
@@ -36,7 +40,9 @@ def u64be(n: int) -> bytes:
 
 def make_vid0(codec: int = 1, width: int = 1920, height: int = 1080,
               fps: float = 30.0, scale: int = 1000, with_subtag: bool = True) -> bytes:
-    """VID0 header — field offsets verified against Gear360App Extractor.kt."""
+    """VID0 header — field offsets verified against Gear360App Extractor.kt.
+    The size field is SELF-INCLUSIVE: record = 4 + size, payload = size - 4.
+    (Real capture: VID0@12 size=96 with a 92-byte payload, LIST next.)"""
     payload = bytearray(96)
     struct.pack_into(">I", payload, 16, codec)
     struct.pack_into(">I", payload, 32, scale)
@@ -46,15 +52,29 @@ def make_vid0(codec: int = 1, width: int = 1920, height: int = 1080,
     struct.pack_into(">I", payload, 48, 1000)
     struct.pack_into(">I", payload, 76, width)
     struct.pack_into(">I", payload, 80, height)
-    return b"VID0" + u32be(len(payload)) + bytes(payload)
+    return b"VID0" + u32be(4 + len(payload)) + bytes(payload)
 
 
-def make_ttts(data: bytes = b"GEAR360HUBTEST") -> bytes:
-    """TTTS structure per Extractor.kt: tag + size + payload(size bytes),
-    where the size field counts ALL payload bytes (payload[0:4] = type flags,
-    then `data`). Real-camera TTTS is a fixed 12-byte structure; the parser
-    consumes exactly 8+size bytes."""
-    return b"TTTS" + u32be(4 + len(data)) + b"\x00\x00\x00\x00" + data
+def make_ttts(type_flags: int = 1) -> bytes:
+    """TTTS structure per Extractor.kt: a FIXED 12-byte structure
+    (tag + size + type). The real camera sends size=0 and still includes the
+    4-byte type word — the size field is informational and NEVER used to
+    skip payload."""
+    return b"TTTS" + u32be(0) + u32be(type_flags)
+
+
+def make_aud0(channel: int = 2, scale: int = 0, codec: int = 0,
+              sample_rate: int = 0) -> bytes:
+    """AUD0 header in the real self-inclusive convention (record = 4 + size).
+    Extractor.kt reads: size, channel, skip4, audioScale, subTag(=AU00),
+    skip4, audioCodecType, skip32, sampleRate, skip20 -> 88 bytes total."""
+    payload = bytearray(80)
+    struct.pack_into(">I", payload, 0, channel)          # +8 abs
+    struct.pack_into(">I", payload, 8, scale)            # +16 abs
+    payload[12:16] = b"AU00"                             # +20 abs
+    struct.pack_into(">I", payload, 16, codec)           # +24 abs
+    struct.pack_into(">I", payload, 52, sample_rate)     # +60 abs
+    return b"AUD0" + u32be(4 + len(payload)) + bytes(payload)
 
 
 def make_movi_header() -> bytes:
@@ -142,7 +162,7 @@ def make_synthetic_stream(frames: list[bytes], codec: int = 1,
     out = bytearray()
     out += make_ttts()
     out += make_vid0(codec=codec, width=width, height=height, fps=fps)
-    out += b"AUD0" + u32be(8) + b"\x00" * 8
+    out += make_aud0()
     out += make_movi_header()
     ts = 0
     for au in aus:

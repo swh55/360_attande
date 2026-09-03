@@ -150,14 +150,16 @@ class CameraManager:
             return out
         try:
             t1 = time.time()
-            with requests.get(url, stream=True, timeout=(3, 5), headers={"Range": "bytes=0-65536"}) as r:
+            with requests.get(url, stream=True, timeout=(3, 5), headers={"Range": "bytes=0-"}) as r:
                 out["http"] = True
                 out["http_status"] = r.status_code
                 out["content_type"] = r.headers.get("Content-Type", "")
                 n = 0
-                for chunk in r.iter_content(16 * 1024):
+                # read just enough to prove real body bytes flow — the camera's
+                # stream server is single-session, so keep this window tiny
+                for chunk in r.iter_content(8 * 1024):
                     n += len(chunk)
-                    if n >= 32768:
+                    if n >= 8192:
                         break
                 out["bytes_received"] = n
                 out["http_latency_ms"] = round((time.time() - t1) * 1000, 1)

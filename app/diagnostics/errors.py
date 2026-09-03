@@ -71,18 +71,11 @@ def snapshot_error_payload(hub, exc: Optional[Exception] = None) -> dict:
     payload = {"error": "SNAPSHOT_UNAVAILABLE"}
     if latest is not None:
         payload.update({
-            "code": "SNAPSHOT_ERROR" if exc else "SNAPSHOT_UNAVAILABLE",
+            "code": "SNAPSHOT_FAILED" if exc else "SNAPSHOT_UNAVAILABLE",
             "stage": "snapshot" if exc else "projection",
             "message": str(exc) if exc else "Snapshot could not be produced from the latest frame.",
             "retryable": True,
             "suggested_action": "Check projection settings; inspect hub logs (logs/errors.log).",
-        })
-    elif cam.state in ("connecting", "reconnecting"):
-        payload.update({
-            "code": "CAMERA_NOT_STREAMING", "stage": "network",
-            "message": "Camera connection is still being established.",
-            "retryable": True,
-            "suggested_action": "Wait a moment and retry; run diagnostics if it stays stuck.",
         })
     elif p is None or cam.state == "disconnected":
         payload.update({
@@ -90,6 +83,13 @@ def snapshot_error_payload(hub, exc: Optional[Exception] = None) -> dict:
             "message": "Camera is disconnected — no frames are being captured.",
             "retryable": True,
             "suggested_action": "Connect the camera (Camera tab) or enable Demo mode (Settings).",
+        })
+    elif cam.state in ("connecting", "reconnecting"):
+        payload.update({
+            "code": "STREAM_NOT_READY", "stage": "network",
+            "message": "Camera connection is still being established.",
+            "retryable": True,
+            "suggested_action": "Wait a moment and retry; run diagnostics if it stays stuck.",
         })
     elif parser is not None and not parser.info.valid:
         payload.update({
@@ -100,21 +100,21 @@ def snapshot_error_payload(hub, exc: Optional[Exception] = None) -> dict:
         })
     elif p.decoder_block_reason:
         payload.update({
-            "code": "DECODER_BLOCKED", "stage": "decoder",
+            "code": "DECODER_NOT_READY", "stage": "decoder",
             "message": f"Decoder blocked: {p.decoder_block_reason}",
             "retryable": True,
             "suggested_action": "Open Parser Details; verify stream metadata values.",
         })
     elif p.decoder is None:
         payload.update({
-            "code": "DECODER_NOT_STARTED", "stage": "decoder",
+            "code": "DECODER_NOT_READY", "stage": "decoder",
             "message": "Stream parser has not produced decodable video yet.",
             "retryable": True,
             "suggested_action": "Check stream parser diagnostics; verify FFmpeg is available.",
         })
     else:
         payload.update({
-            "code": "NO_DECODED_FRAME", "stage": "decoder",
+            "code": "NO_FRAME_AVAILABLE", "stage": "decoder",
             "message": "Decoder is running but no decoded frame is available yet.",
             "retryable": True,
             "suggested_action": "Check stream parser and decoder diagnostics.",
@@ -122,11 +122,14 @@ def snapshot_error_payload(hub, exc: Optional[Exception] = None) -> dict:
     payload["evidence"] = {
         "mode": hub.mode,
         "camera_state": cam.state,
+        "camera_connected": bool(cam.camera_reachable),
+        "stream_connected": bool(p and p.http_ok),
         "http_status": p.http_status if p else None,
         "bytes_seen": parser.bytes_seen if parser else 0,
         "chunks_seen": parser.chunks_seen if parser else 0,
         "parser_valid": bool(parser and parser.info.valid),
         "decoder_active": bool(p and p.decoder is not None),
+        "decoded_frames": p.decoded_frames if p else 0,
         "frames_published": hub.bus.published,
     }
     return payload

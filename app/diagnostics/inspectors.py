@@ -222,149 +222,89 @@ def scan_signatures(data: bytes, cap: int = 2000) -> dict:
 
 def _structure_anchors(data: bytes, cap: int = 5000) -> list[int]:
     """Walk the container (header zone + movi media chunks) and return the
-    sorted offsets where known structures start. Mirrors the layout rules of
-    validate_structure()/the live parser: TOP tags consume 8+size bytes (TTTS
-    size counts its type field), media chunks consume 16+size bytes."""
+    sorted offsets where known structures start. Uses parse_chunk() — the
+    same verified boundary math as the live parser (TTTS fixed 12 bytes,
+    VID0/AUD0/VR00 self-inclusive size fields, media chunks 16+size)."""
+    from ..stream.parser import parse_chunk
     starts: list[int] = []
     pos = 0
     n = len(data)
-    while pos < n and len(starts) < cap:
-        tag = data[pos:pos + 4]
-        if tag == b"movi":
-            starts.append(pos)
-            pos += 4
-            continue
-        if tag in TOP_TAGS:
-            if n < pos + 8:
-                break
-            size = int.from_bytes(data[pos + 4:pos + 8], "big")
-            end = pos + 8 + size
-        elif tag in MEDIA_TAGS:
-            if n < pos + 16:
-                break
-            size = int.from_bytes(data[pos + 4:pos + 8], "big")
-            end = pos + 16 + size
-        else:
+    guard = 0
+    while pos < n and len(starts) < cap and guard < cap:
+        guard += 1
+        c = parse_chunk(data, pos)
+        if c["zone"] == "unknown":
             break
         starts.append(pos)
-        if end >= n:
+        nxt = c["next_offset"]
+        if nxt is None or nxt <= pos or nxt > n:
             break
-        pos = end if data[end:end + 4] in TOP_TAGS or data[end:end + 4] in MEDIA_TAGS else n
+        pos = nxt
     return starts
 
 
 def validate_structure(data: bytes, cap: int = 500) -> dict:
-    """Walk the buffer structure-by-structure and verify chunk boundaries:
-    next_offset == current_offset + header + payload must land on a known tag.
-    Header-zone tags consume 8+size bytes (TTTS size counts its type field);
-    movi-zone media chunks (00VD/00AU/00VR) consume 16+size bytes
-    (tag + size + timestamp + payload). A structure that runs to the end of
-    the buffer counts as valid — bounded windows/live tails truncate it."""
+    """Walk the buffer structure-by-structure with parse_chunk() and verify
+    chunk boundaries: next_offset == current_offset + header + payload must
+    land on a known tag. Conventions are the verified ones (Extractor.kt +
+    real SM-R210 capture): TTTS is a FIXED 12-byte structure; VID0/AUD0/VR00
+    size fields are SELF-INCLUSIVE (record = 4+size); movi media chunks
+    (00VD/00AU/00VR) consume 16+size bytes. A structure that runs to the end
+    of the buffer counts as valid — bounded windows/live tails truncate it."""
+    from ..stream.parser import parse_chunk
     rows = []
     pos = 0
     n = len(data)
     while pos < n and len(rows) < cap:
-        tag = data[pos:pos + 4]
-        row = {"tag": tag.decode("ascii", "replace"), "offset": pos,
-               "declared_size": None, "available": None, "next_offset": None,
-               "boundary_ok": None}
-        if tag in TOP_TAGS:
-            if tag == b"movi":
-                row["next_offset"] = pos + 4
-                row["boundary_ok"] = True
-                rows.append(row)
-                pos += 4
-                continue
-            size = int.from_bytes(data[pos + 4:pos + 8], "big") if n >= pos + 8 else None
-            header = 8
-            if tag == b"TTTS":
-                header = 12
-                declared_next = (pos + 8 + size) if size is not None else None
-            else:
-                declared_next = (pos + 8 + size) if size is not None else None
-            row["declared_size"] = size
-            row["available"] = max(0, n - pos - 8)
-            row["next_offset"] = declared_next
-            if declared_next is None:
-                row["boundary_ok"] = None
-                rows.append(row)
-                break
-            if declared_next >= n:
-                if size is not None and 0 < size <= 16 * 1024 * 1024:
-                    row["boundary_ok"] = True
-                    row["note"] = "end of buffer"
-                else:
-                    row["boundary_ok"] = False
-                    row["note"] = f"implausible declared size {size}"
-                rows.append(row)
-                break
-            nxt = data[declared_next:declared_next + 4]
-            if nxt in TOP_TAGS or nxt in MEDIA_TAGS or nxt == b"VD00":
-                row["boundary_ok"] = True
-                rows.append(row)
-                pos = declared_next
-                continue
-            # declared size may be self-inclusive (+4) on some firmwares
-            nxt2 = data[declared_next - 4:declared_next]
-            if nxt2 in TOP_TAGS or nxt2 in MEDIA_TAGS:
-                row["boundary_ok"] = False
-                row["note"] = "boundary lands 4 bytes late — size field looks self-inclusive"
-                rows.append(row)
-                pos = declared_next - 4
-                continue
+        c = parse_chunk(data, pos)
+        row = {"tag": c["tag"].decode("ascii", "replace"), "offset": pos,
+               "declared_size": c["declared_size"],
+               "available": (max(0, n - pos - c["header_size"])
+                             if c["header_size"] else None),
+               "next_offset": c["next_offset"], "boundary_ok": None}
+        if c["error"]:
+            row["note"] = c["error"]
+        if c["zone"] == "unknown":
             row["boundary_ok"] = False
+            row.setdefault("note", "unknown bytes (no valid tag here)")
             rows.append(row)
-            # resync: next known tag
-            best = -1
-            for t in TOP_TAGS + MEDIA_TAGS:
-                i = data.find(t, pos + 4)
-                if i >= 0 and (best < 0 or i < best):
-                    best = i
-            pos = best if best >= 0 else n
-        elif tag in MEDIA_TAGS:
-            # media chunk: tag(4) + size(4) + timestamp(8) + payload(size)
-            if n < pos + 16:
-                row["note"] = "truncated media chunk header"
-                rows.append(row)
-                break
-            size = int.from_bytes(data[pos + 4:pos + 8], "big")
-            declared_next = pos + 16 + size
-            row["declared_size"] = size
-            row["available"] = max(0, n - pos - 16)
-            row["next_offset"] = declared_next
-            if declared_next >= n:
-                if 0 < size <= 16 * 1024 * 1024:
-                    row["boundary_ok"] = True
-                    row["note"] = "end of buffer"
-                else:
-                    row["boundary_ok"] = False
-                    row["note"] = f"implausible declared size {size}"
-                rows.append(row)
-                break
-            nxt = data[declared_next:declared_next + 4]
-            if nxt in TOP_TAGS or nxt in MEDIA_TAGS:
-                row["boundary_ok"] = True
-                rows.append(row)
-                pos = declared_next
-                continue
-            row["boundary_ok"] = False
-            rows.append(row)
-            best = -1
-            for t in TOP_TAGS + MEDIA_TAGS:
-                i = data.find(t, pos + 4)
-                if i >= 0 and (best < 0 or i < best):
-                    best = i
-            pos = best if best >= 0 else n
-        else:
             best = -1
             for t in TOP_TAGS + MEDIA_TAGS:
                 i = data.find(t, pos + 1)
                 if i >= 0 and (best < 0 or i < best):
                     best = i
-            row["boundary_ok"] = False
-            row["note"] = "unknown bytes (no valid tag here)"
-            rows.append(row)
             pos = best if best >= 0 else n
+            continue
+        nxt = c["next_offset"]
+        if nxt is None:
+            rows.append(row)
+            break
+        if nxt >= n:
+            size = c["declared_size"]
+            if size is None or 0 < size <= 16 * 1024 * 1024:
+                row["boundary_ok"] = True
+                row["note"] = "end of buffer"
+            else:
+                row["boundary_ok"] = False
+                row["note"] = f"implausible declared size {size}"
+            rows.append(row)
+            break
+        nxt4 = data[nxt:nxt + 4]
+        if nxt4 in TOP_TAGS or nxt4 in MEDIA_TAGS:
+            row["boundary_ok"] = True
+            rows.append(row)
+            pos = nxt
+            continue
+        row["boundary_ok"] = False
+        row["note"] = (row.get("note", "") +
+                       "boundary does not land on a known tag").strip()
+        rows.append(row)
+        best = -1
+        for t in TOP_TAGS + MEDIA_TAGS:
+            i = data.find(t, pos + 4)
+            if i >= 0 and (best < 0 or i < best):
+                best = i
+        pos = best if best >= 0 else n
     invalid = [r for r in rows if r["boundary_ok"] is False]
     return {
         "rows": rows,

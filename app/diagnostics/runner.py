@@ -120,8 +120,38 @@ class DiagnosticsRunner:
         run("tcp_connect", "TCP connectivity", s_tcp)
 
         # 3+4+5 — HTTP: one variant matrix feeds all three steps (single cost)
+        # IMPORTANT: the camera's streaming server is single-session. When the
+        # live pipeline already holds a working HTTP stream, opening probe
+        # connections COMPETES for it and can starve the live preview (bytes
+        # moved to the newest request). In that case we reuse live-pipeline
+        # evidence and touch the camera with ZERO extra stream connections.
 
         def s_http(sr: StepResult) -> StepResult:
+            if p is not None and p.http_ok and live_parser is not None \
+                    and live_parser.bytes_seen > 0:
+                ctx["http"] = {
+                    "url": f"http://{host}:{port}{path}",
+                    "status": p.http_status, "content_type": p.http_content_type,
+                    "bytes_read": live_parser.bytes_seen,
+                    "bytes_per_sec": p.bytes_per_sec,
+                    "variant": "live-pipeline (no probe connections opened)",
+                    "headers": {},
+                }
+                ctx["http_variants"] = {
+                    "variants": [], "any_data": True, "all_stalled": False,
+                    "best": ctx["http"],
+                    "note": ("live pipeline is streaming — probe matrix skipped "
+                             "to keep the camera's single stream session"),
+                }
+                sr.status = STATUS_PASS
+                sr.detail = (f"live pipeline streaming: HTTP {p.http_status}, "
+                             f"{live_parser.bytes_seen}B seen, {p.bytes_per_sec} B/s "
+                             "(no probe connections opened)")
+                sr.evidence = {"source": "live-pipeline",
+                               "bytes_seen": live_parser.bytes_seen,
+                               "bytes_per_sec": p.bytes_per_sec,
+                               "http_status": p.http_status}
+                return sr
             res = http_probe_variants(host, port, path)
             ctx["http_variants"] = res
             ctx["http"] = dict(res.get("best") or {})
@@ -246,8 +276,12 @@ class DiagnosticsRunner:
             vid0_payload = bytes(live_parser.vid0_raw)
         elif has_data:
             i = data.find(b"VID0")
-            if i >= 0 and len(data) >= i + 8 + 96:
-                vid0_payload = data[i + 8: i + 8 + 96]
+            if i >= 0 and len(data) >= i + 12:
+                size = int.from_bytes(data[i + 4:i + 8], "big")
+                # self-inclusive size field: payload = size - 4 bytes
+                end = min(len(data), i + 8 + max(0, size - 4))
+                if size >= 4:
+                    vid0_payload = data[i + 8:end]
 
         def s_vid0(sr: StepResult) -> StepResult:
             if len(vid0_payload) < 84:

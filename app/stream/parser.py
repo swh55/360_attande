@@ -1,21 +1,24 @@
 """Gear 360 live-preview container parser (SM-R210 /livestream_high.avi).
 
 Layout reference: TecCheck/Gear360App player/Extractor.kt (proven against real
-hardware). The header zone is a run of big-endian FourCC-tagged structures:
+hardware). The header zone is a run of big-endian FourCC-tagged structures.
 
-  TTTS  tag(4) + size(4) + payload (size bytes; payload[0:4] = type flags,
-        i.e. size COUNTS the type field -- Extractor.kt reads tag+size+type
-        as a fixed 12-byte structure and never skips extra bytes)
-  VID0  tag(4) + size(4) + payload:
-          +16  u32be codec          (1 = HEVC; 0/other = h264/raw)
-          +32  u32be timestamp_scale
-          +36  u32be subTag         MUST be "VD00" (0x56443030) -- layout marker
-          +44  u32be fps numerator
-          +48  u32be fps denominator
-          +76  u32be width
-          +80  u32be height
-  AUD0  tag(4) + size(4) + payload (+12: subTag "AU00")
-  VR00  tag(4) + size(4) + payload (+4: subTag "VR00")
+Record-size conventions — VERIFIED twice, against Extractor.kt arithmetic AND
+the real SM-R210 capture (DG-20260903-001, 2026-09-03 22:48):
+
+  TTTS  tag(4) + size(4) + type(4) — a FIXED 12-byte structure.
+        Extractor.kt readMainHeader reads size+type and never skips more;
+        the real camera sends size=0 and still includes the 4-byte type word.
+        (An earlier Hub version consumed 8+size bytes, which for size=0 left
+        4 stray bytes and forced a resync before VID0.)
+  VID0  tag(4) + size(4) + payload(size-4): the size field is SELF-INCLUSIVE
+        (it counts itself). Extractor.kt: headerSize += size + 4 after
+        consuming exactly tag+size+16+4+12+8+4+8+24+8+8 = size+4 bytes.
+        Real capture: VID0@12 size=96 -> record ends at 112 where LIST sits.
+        (An earlier Hub version consumed 8+size = 4 bytes too many, forcing a
+        resync before movi.)
+  AUD0  tag(4) + size(4) + payload(size-4); payload +12: subTag "AU00"
+  VR00  tag(4) + size(4) + payload(size-4); payload +4: subTag "VR00"
   LIST  tag(4) + size(4) (list type follows, e.g. "movi")
   movi  payload zone: 00VD / 00AU / 00VR chunks:
           tag(4) + size(4) + timestamp(8) + payload(size)
@@ -23,6 +26,15 @@ hardware). The header zone is a run of big-endian FourCC-tagged structures:
         payload[4] is the first NAL header byte (HEVC IDR = 0x26/38, VPS-led
         AU = 0x40/64 -> keyframes), plus a 5-byte per-chunk trailer that is
         NOT part of the bitstream (reference keeps size-5 bytes per chunk).
+
+VID0 payload field map (offsets relative to the byte after tag+size):
+  +16  u32be codec          (1 = HEVC; 0/other = h264/raw)
+  +32  u32be timestamp_scale
+  +36  u32be subTag         MUST be "VD00" (0x56443030) -- layout marker
+  +44  u32be fps numerator
+  +48  u32be fps denominator
+  +76  u32be width
+  +80  u32be height
 
 History: the first Hub implementation parsed VID0 at shifted offsets
 (codec +20, scale +36, fps +52, dims +88) and read the VD00 subTag as
@@ -165,6 +177,87 @@ class ByteBuffer:
             self._pos = 0
 
 
+# ---------------------------------------------------------------------------
+# pure boundary helper (unit-testable, mirrors Extractor.kt exactly)
+# ---------------------------------------------------------------------------
+def parse_chunk(data: bytes, offset: int = 0) -> dict:
+    """Parse ONE container record at `offset` and return its geometry.
+
+    Works for both the header zone and the movi payload zone. Returned dict:
+      tag           FourCC bytes (b"" when the buffer is too short)
+      zone          "header" | "media" | "unknown"
+      offset        as given
+      header_size   bytes before the payload (12 for TTTS, 16 for media, 8 else)
+      declared_size raw size field value (None when unavailable)
+      payload_offset absolute offset of the first payload byte
+      payload_size  bytes of payload (per the verified convention)
+      next_offset   absolute offset of the next record (None when undecidable)
+      boundary_ok   True/False/None — does the next record start with a known tag?
+      error         human-readable validation problem ("" when healthy)
+
+    Conventions (verified against Extractor.kt + real SM-R210 capture):
+      TTTS:  fixed 12-byte structure (tag+size+type); size field informational.
+      VID0/AUD0/VR00: record = tag(4) + size(4) + payload(size-4) — the size
+             field is SELF-INCLUSIVE.
+      LIST:  tag(4) + size(4).
+      movi:  4-byte tag opening the payload zone.
+      media: tag(4) + size(4) + ts(8) + payload(size) — size counts payload only.
+    """
+    out = {"tag": b"", "zone": "unknown", "offset": offset, "header_size": 0,
+           "declared_size": None, "payload_offset": None, "payload_size": None,
+           "next_offset": None, "boundary_ok": None, "error": ""}
+    n = len(data)
+    if offset < 0 or offset + 4 > n:
+        out["error"] = "truncated tag"
+        return out
+    tag = data[offset:offset + 4]
+    out["tag"] = tag
+    if tag == TAG_MOVI:
+        out.update(zone="header", header_size=4, payload_offset=offset + 4,
+                   payload_size=0, next_offset=offset + 4, boundary_ok=None)
+        return out
+    if offset + 8 > n:
+        out["error"] = "truncated size field"
+        return out
+    size = int.from_bytes(data[offset + 4:offset + 8], "big")
+    out["declared_size"] = size
+    if tag == TAG_TTTS:
+        out.update(zone="header", header_size=12, payload_offset=offset + 12,
+                   payload_size=0, next_offset=offset + 12)
+        if size > 4:
+            out["error"] = (f"TTTS size={size} > 4 — Extractor.kt treats TTTS as a "
+                            "fixed 12-byte structure; unexpected payload")
+        return out
+    if tag in (TAG_VID0, TAG_AUD0, TAG_VR00, TAG_LIST):
+        out["zone"] = "header"
+        if size < 4:
+            out["error"] = f"{tag.decode('ascii', 'replace')} size={size} < 4 (self-inclusive)"
+            return out
+        out.update(header_size=8, payload_offset=offset + 8, payload_size=size - 4,
+                   next_offset=offset + 4 + size)
+        return out
+    if tag in KNOWN_MEDIA_TAGS:
+        out["zone"] = "media"
+        out.update(header_size=16, payload_offset=offset + 16, payload_size=size,
+                   next_offset=offset + 16 + size)
+        if size <= 0 or size > _MAX_CHUNK:
+            out["error"] = f"implausible media chunk size {size}"
+        return out
+    out["error"] = f"unknown tag {tag!r}"
+    return out
+
+
+def _boundary_ok(data: bytes, next_offset: Optional[int]) -> Optional[bool]:
+    """Does `next_offset` land on a known tag (or the end of the buffer)?"""
+    if next_offset is None:
+        return None
+    n = len(data)
+    if next_offset >= n:
+        return True                       # runs to the end — treated as valid
+    return data[next_offset:next_offset + 4] in KNOWN_TOP_TAGS or \
+        data[next_offset:next_offset + 4] in KNOWN_MEDIA_TAGS
+
+
 class Gear360ChunkParser:
     """Stateful parser: feed network bytes, extract video access units."""
 
@@ -193,6 +286,10 @@ class Gear360ChunkParser:
         self.au_ring: deque = deque(maxlen=_AU_RING_MAX)
         self.framing_stats: dict = {}
         self._anomalies: deque = deque(maxlen=64)
+        self.pending_chunk: Optional[dict] = None   # incompletely buffered chunk
+        self.first_00vd_logged = False
+        self._last_pending_warn = 0.0
+        self._pending_since: Optional[float] = None
 
     # -- public API ---------------------------------------------------------
     def feed(self, data: bytes) -> list[VideoFrame]:
@@ -246,6 +343,10 @@ class Gear360ChunkParser:
         self.au_ring = deque(maxlen=_AU_RING_MAX)
         self.framing_stats = {}
         self._anomalies = deque(maxlen=64)
+        self.pending_chunk = None
+        self.first_00vd_logged = False
+        self._last_pending_warn = 0.0
+        self._pending_since = None
 
     def diagnostics_snapshot(self) -> dict:
         """Bounded structured state for the diagnostics engine / API."""
@@ -275,6 +376,7 @@ class Gear360ChunkParser:
             "chunk_log": list(self.chunk_log)[-64:],
             "anomalies": list(self._anomalies),
             "au_ring_size": len(self.au_ring),
+            "pending_chunk": dict(self.pending_chunk) if self.pending_chunk else None,
         }
 
     # -- internals ----------------------------------------------------------
@@ -330,25 +432,31 @@ class Gear360ChunkParser:
                 return None
 
             if tag == TAG_TTTS:
-                # Extractor.kt: TTTS = tag + size + payload(size bytes), where
-                # the size field counts the 4-byte type flags -> total 8+size.
-                # A size beyond _MAX_TTTS can never be real (real TTTS = 12B);
-                # reject it instead of stalling the stream forever.
-                if avail < 8:
+                # Extractor.kt: TTTS is a FIXED 12-byte structure
+                # (tag + size + type). The size field is informational — the
+                # real camera sends size=0 and still includes the type word.
+                # Consuming 8+size (an earlier implementation) leaves 4 stray
+                # bytes on the wire and forces a pointless resync.
+                if avail < 12:
                     raise EOFError
                 size = self._u32be(self.buffer.peek(8)[4:8])
                 if size > _MAX_TTTS:
                     self.buffer.discard_to(4)
                     self._anomaly("ttts_size_invalid", f"size={size}")
                     continue
-                if avail < 8 + size:
-                    raise EOFError
-                self.buffer.read(8 + size)
+                self.buffer.read(12)
                 self.ttts_size_fields.append(size)
+                if size > 4:
+                    self._anomaly("ttts_size_unexpected",
+                                  f"size={size} — treated as fixed 12B per Extractor.kt")
                 self._log_chunk(TAG_TTTS, self._abs_offset(), size, 0, True)
                 continue
 
             if tag in (TAG_VID0, TAG_AUD0, TAG_VR00):
+                # Self-inclusive size field: record = tag(4) + size(4) +
+                # payload(size-4). Extractor.kt consumes exactly size+4 bytes
+                # per record (headerSize += size + 4); the real capture
+                # confirms VID0@12 size=96 ends at 112 where LIST starts.
                 if avail < 8:
                     raise EOFError
                 size = self._u32be(self.buffer.peek(8)[4:8])
@@ -356,9 +464,14 @@ class Gear360ChunkParser:
                     self.buffer.discard_to(4)
                     self._anomaly(f"{tag.decode('ascii', 'replace').lower()}_size_invalid", f"size={size}")
                     continue
-                if avail < 8 + size:
+                if size < 4:
+                    self.buffer.discard_to(4)
+                    self._anomaly(f"{tag.decode('ascii', 'replace').lower()}_size_invalid",
+                                  f"size={size} < 4 (size field is self-inclusive)")
+                    continue
+                if avail < 4 + size:
                     raise EOFError
-                payload = self.buffer.read(8 + size)[8:]
+                payload = self.buffer.read(4 + size)[8:]
                 if tag == TAG_VID0:
                     self.vid0_seen_at = self._abs_offset()
                     self.vid0_size_field = size
@@ -457,10 +570,36 @@ class Gear360ChunkParser:
         if size <= 0 or size > _MAX_CHUNK:
             raise ValueError(f"invalid chunk size {size}")
         if self.buffer.available() < 16 + size:
+            # atomic: wait until the whole chunk is buffered. Keep a visible
+            # pending state — a silent wait here is exactly what made the
+            # DG-20260903-001 session look dead (first 00VD > bytes received).
+            now = time.time()
+            if self._pending_since is None:
+                self._pending_since = now
+            self.pending_chunk = {
+                "tag": tag.decode("ascii", "replace"), "size": size,
+                "have": self.buffer.available(), "waiting_s": round(now - self._pending_since, 1),
+            }
+            if now - self._last_pending_warn >= 5.0:
+                self._last_pending_warn = now
+                LOG.warning(
+                    "STREAM: chunk %s #%d incomplete — have %d/%d bytes for %.1fs "
+                    "— waiting for the camera to stream the rest",
+                    tag.decode("ascii", "replace"), self.chunks_seen,
+                    self.buffer.available(), size, now - self._pending_since)
             raise EOFError
+        self.pending_chunk = None
+        self._pending_since = None
         self.buffer.read(16)
         payload = self.buffer.read(size)
         self.chunks_seen += 1
+        if not self.first_00vd_logged and tag == TAG_00VD:
+            self.first_00vd_logged = True
+            LOG.info(
+                "STREAM: first 00VD parsed — offset=0x%x size=%d ts=%d "
+                "head=%s trailer=%s (payload bytes now flowing)",
+                start_abs, size, ts, payload[:8].hex(" "),
+                (payload[-5:].hex(" ") if len(payload) >= 5 else "n/a"))
 
         nxt = b""
         if self.buffer.available() >= 4:
