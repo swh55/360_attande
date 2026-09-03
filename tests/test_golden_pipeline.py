@@ -27,7 +27,8 @@ def test_golden_pipeline_real_h264(real_h264_access_units):
     aus = real_h264_access_units["aus"]
     w, h = real_h264_access_units["width"], real_h264_access_units["height"]
 
-    stream = make_synthetic_stream(aus, codec=0, width=w, height=h, fps=10.0)
+    stream = make_synthetic_stream(aus, codec=0, width=w, height=h, fps=10.0,
+                                   force_first_keyframe=False)
     parser = Gear360ChunkParser()
     frames = parser.feed(stream)
     assert parser.info.width == w

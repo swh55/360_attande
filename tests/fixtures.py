@@ -1,8 +1,12 @@
 """Shared test fixtures: synthetic Gear360 stream builder + temp DB.
 
 The synthetic builder mirrors the real SM-R210 container structure:
-  TTTS chunks -> VID0 header -> LIST -> movi -> 00VD/00AU chunk run
-so parser tests exercise the exact byte layout the camera produces.
+  TTTS -> VID0 -> AUD0 -> LIST/movi -> 00VD/00AU chunk run
+with field offsets VERIFIED against TecCheck/Gear360App Extractor.kt and real
+camera captures (see app/stream/parser.py module docstring):
+  VID0: codec@16 scale@32 subTag("VD00")@36 fpsNum@44 fpsDen@48 width@76 height@80
+  00VD payload: 00 00 00 01 + access unit + 5-byte trailer (payload[4] = first
+  NAL header byte; 0x26/38 = HEVC IDR -> keyframe).
 """
 from __future__ import annotations
 
@@ -31,20 +35,26 @@ def u64be(n: int) -> bytes:
 
 
 def make_vid0(codec: int = 1, width: int = 1920, height: int = 1080,
-              fps: float = 30.0, scale: int = 1000) -> bytes:
-    """VID0 header with field offsets matching Gear360App Extractor.kt."""
+              fps: float = 30.0, scale: int = 1000, with_subtag: bool = True) -> bytes:
+    """VID0 header — field offsets verified against Gear360App Extractor.kt."""
     payload = bytearray(96)
-    struct.pack_into(">I", payload, 20, codec)
-    struct.pack_into(">I", payload, 36, scale)
-    struct.pack_into(">I", payload, 52, int(fps * 1000))
-    struct.pack_into(">I", payload, 56, 1000)
-    struct.pack_into(">I", payload, 88, width)
-    struct.pack_into(">I", payload, 92, height)
+    struct.pack_into(">I", payload, 16, codec)
+    struct.pack_into(">I", payload, 32, scale)
+    if with_subtag:
+        payload[36:40] = b"VD00"
+    struct.pack_into(">I", payload, 44, int(round(fps * 1000)))
+    struct.pack_into(">I", payload, 48, 1000)
+    struct.pack_into(">I", payload, 76, width)
+    struct.pack_into(">I", payload, 80, height)
     return b"VID0" + u32be(len(payload)) + bytes(payload)
 
 
 def make_ttts(data: bytes = b"GEAR360HUBTEST") -> bytes:
-    return b"TTTS" + u32be(len(data)) + b"\x00\x00\x00\x00" + data
+    """TTTS structure per Extractor.kt: tag + size + payload(size bytes),
+    where the size field counts ALL payload bytes (payload[0:4] = type flags,
+    then `data`). Real-camera TTTS is a fixed 12-byte structure; the parser
+    consumes exactly 8+size bytes."""
+    return b"TTTS" + u32be(4 + len(data)) + b"\x00\x00\x00\x00" + data
 
 
 def make_movi_header() -> bytes:
@@ -52,14 +62,19 @@ def make_movi_header() -> bytes:
     return b"LIST" + u32be(4) + b"movi"
 
 
-def make_00vd(timestamp: int, payload: bytes, frame_type: int = 64) -> bytes:
-    body = bytes([0, 0, 0, 0, frame_type]) + payload
+def make_00vd(timestamp: int, au: bytes) -> bytes:
+    """Video chunk with the real-camera framing:
+    payload = 00 00 00 01 + AU + 5-byte trailer.
+    `au` is a complete access unit WITHOUT a leading start code; its first byte
+    is the first NAL header byte, which the parser reads as the keyframe
+    marker (0x26/38 = HEVC IDR, 0x40/64 = VPS-led AU)."""
+    body = b"\x00\x00\x00\x01" + au + b"\x00" * 5
     return b"00VD" + u32be(len(body)) + u64be(timestamp) + body
 
 
-# frame-type bytes that the parser counts as keyframes (Gear360App semantics)
-KEYFRAME_TYPE = 64
-NON_KEY_TYPE = 1
+# first-NAL header bytes used by tests (HEVC semantics, parse-only — never decoded)
+KEYFRAME_TYPE = 38      # HEVC IDR_W_RADL NAL header byte
+NON_KEY_TYPE = 2        # HEVC TRAIL_R
 
 
 def make_00au(timestamp: int, payload: bytes = b"\x01\x02\x03\x04") -> bytes:
@@ -113,21 +128,30 @@ def annexb_to_access_units(annexb: bytes) -> list[bytes]:
 
 def make_synthetic_stream(frames: list[bytes], codec: int = 1,
                           width: int = 1920, height: int = 1080,
-                          fps: float = 30.0) -> bytes:
-    """Build a complete Gear360 container around pre-encoded access units."""
+                          fps: float = 30.0,
+                          force_first_keyframe: bool = True) -> bytes:
+    """Build a complete Gear360 container around access units.
+
+    `frames` are access units WITHOUT leading start codes (their first byte is
+    the first NAL header byte). With force_first_keyframe=True, frame 0 gets a
+    0x26 marker prepended so the parser reports a keyframe (parse-only tests —
+    pass False when the AUs will actually be decoded, e.g. golden tests)."""
+    aus = list(frames)
+    if force_first_keyframe and aus and aus[0][:1] not in (b"\x26", b"\x40"):
+        aus[0] = bytes([KEYFRAME_TYPE]) + aus[0]
     out = bytearray()
     out += make_ttts()
     out += make_vid0(codec=codec, width=width, height=height, fps=fps)
     out += b"AUD0" + u32be(8) + b"\x00" * 8
     out += make_movi_header()
     ts = 0
-    for i, au in enumerate(frames):
-        ftype = KEYFRAME_TYPE if i == 0 else NON_KEY_TYPE
-        out += make_00vd(ts, au, frame_type=ftype)
+    for au in aus:
+        out += make_00vd(ts, au)
         ts += 33
-        if i % 5 == 0:
+        if ts % 165 == 33:      # audio every 5th frame (after frames 0, 5, 10, ...)
             out += make_00au(ts)
     return bytes(out)
+
 
 def _find_ffmpeg() -> str | None:
     from shutil import which

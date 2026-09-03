@@ -1,9 +1,11 @@
 """FFmpeg-based decoder for raw HEVC/H264 access units from the Gear 360 stream.
 
-Improvement over the prototype: a dedicated stdout reader thread feeds a bounded
-queue, so `write()` never blocks forever when ffmpeg emits no frame yet (the
-prototype could deadlock on a blocking exact-size read). Decoded frames are
-published as BGR ndarrays, memory-bounded via drop-oldest.
+A dedicated stdout reader thread feeds a bounded queue, so `write()` never
+blocks forever when ffmpeg emits no frame yet. Decoded frames are published as
+BGR ndarrays, memory-bounded via drop-oldest.
+
+StreamPipeline glues camera bytes -> parser -> decoder -> FrameBus and exposes
+live signals + a diagnostics snapshot for the diagnostics engine.
 """
 from __future__ import annotations
 
@@ -34,6 +36,12 @@ class FFmpegDecoder:
         self._err_thread: Optional[threading.Thread] = None
         self._stopped = threading.Event()
         self.dropped = 0
+        self.frames_out = 0
+        self.bytes_in = 0
+        self.started_at = 0.0
+        self.last_write_wall = 0.0
+        self.last_error = ""
+        self.stderr_tail: deque = deque(maxlen=40)
 
     def start(self) -> None:
         if self.width <= 0 or self.height <= 0:
@@ -42,7 +50,6 @@ class FFmpegDecoder:
         cmd = [
             self.ffmpeg_path, "-hide_banner", "-loglevel", "error",
             # low-latency streaming: minimal probe so frames flow immediately
-            # (defaults buffer ~5MB before emitting the first packet)
             "-probesize", "32", "-analyzeduration", "0",
             "-f", fmt, "-i", "pipe:0",
             "-an", "-sn", "-f", "rawvideo", "-pix_fmt", "bgr24", "pipe:1",
@@ -51,11 +58,23 @@ class FFmpegDecoder:
         self.proc = subprocess.Popen(
             cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE
         )
+        self.started_at = time.time()
         self._stopped.clear()
         self._reader = threading.Thread(target=self._read_loop, name="ffmpeg-reader", daemon=True)
         self._reader.start()
         self._err_thread = threading.Thread(target=self._drain_stderr, name="ffmpeg-stderr", daemon=True)
         self._err_thread.start()
+
+    @property
+    def is_running(self) -> bool:
+        return self.proc is not None and self.proc.poll() is None
+
+    @property
+    def decode_fps(self) -> float:
+        if not self.started_at:
+            return 0.0
+        dt = max(0.001, time.time() - self.started_at)
+        return round(self.frames_out / dt, 1)
 
     def _read_loop(self) -> None:
         assert self.proc and self.proc.stdout
@@ -69,10 +88,12 @@ class FFmpegDecoder:
                 if not chunk:
                     if not self._stopped.is_set():
                         LOG.warning("ffmpeg stdout closed")
+                        self.last_error = self.last_error or "ffmpeg stdout closed unexpectedly"
                         self._stopped.set()
                     return
                 buf.extend(chunk)
             arr = np.frombuffer(bytes(buf), dtype=np.uint8).reshape((self.height, self.width, 3))
+            self.frames_out += 1
             try:
                 self._out_q.put_nowait(arr.copy())
             except queue.Full:
@@ -89,8 +110,12 @@ class FFmpegDecoder:
     def _drain_stderr(self) -> None:
         assert self.proc and self.proc.stderr
         try:
-            for _line in self.proc.stderr:
-                pass  # ffmpeg errors surface via exit status / logs
+            for raw in self.proc.stderr:
+                line = raw.decode("utf-8", "replace").rstrip()
+                if line:
+                    self.stderr_tail.append(line)
+                    if "error" in line.lower() or "invalid" in line.lower():
+                        self.last_error = line
         except Exception:
             pass
 
@@ -99,17 +124,22 @@ class FFmpegDecoder:
     def write(self, payload: bytes) -> list[np.ndarray]:
         """Push one encoded access unit; return any decoded frames available.
 
-        Access units are fed to ffmpeg as Annex-B: if the payload does not
-        already begin with a start code, one is prepended so the first NAL is
-        framed correctly (the real camera payload framing may vary).
+        Access units are fed to ffmpeg as Annex-B. If the payload does not
+        already begin with a start code, one is prepended.
         """
         if self.proc is None or self.proc.stdin is None:
             raise RuntimeError("Decoder not started")
         if not payload.startswith(self._START_CODES):
             payload = b"\x00\x00\x00\x01" + payload
         out: list[np.ndarray] = []
-        self.proc.stdin.write(payload)
-        self.proc.stdin.flush()
+        try:
+            self.proc.stdin.write(payload)
+            self.proc.stdin.flush()
+            self.bytes_in += len(payload)
+            self.last_write_wall = time.time()
+        except (BrokenPipeError, OSError) as exc:
+            self.last_error = f"stdin write failed: {exc}"
+            raise
         while True:
             try:
                 out.append(self._out_q.get_nowait())
@@ -144,7 +174,15 @@ class StreamPipeline:
         self.decoded_frames = 0
         self.error: Optional[str] = None
         self.last_frame_wall = 0.0
+        self.http_ok = False
+        self.http_status: Optional[int] = None
+        self.http_content_type = ""
+        self.first_byte_wall = 0.0
+        self.last_chunk_wall = 0.0
+        self.decoder_block_reason: Optional[str] = None
         self._fps_window: deque[float] = deque(maxlen=120)
+        self._bytes_window: deque[tuple] = deque(maxlen=240)
+        self._last_sample = 0.0
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._cfg: dict = {}
@@ -175,24 +213,115 @@ class StreamPipeline:
         recent = [t for t in self._fps_window if now - t <= 2.0]
         return round(len(recent) / 2.0, 1) if len(recent) >= 2 else 0.0
 
+    @property
+    def bytes_per_sec(self) -> float:
+        now = time.time()
+        pts = [(t, b) for t, b in self._bytes_window if now - t <= 5.0]
+        if len(pts) < 2:
+            return 0.0
+        dt = pts[-1][0] - pts[0][0]
+        db = pts[-1][1] - pts[0][1]
+        return round(db / dt, 0) if dt > 0 else 0.0
+
+    # ---- diagnostics / health ----------------------------------------------
+    def signals(self) -> dict:
+        """Layered health signals for the health state machine."""
+        parser = self.parser
+        return {
+            "http_ok": self.http_ok,
+            "http_status": self.http_status,
+            "bytes_seen": parser.bytes_seen if parser else 0,
+            "chunks_seen": parser.chunks_seen if parser else 0,
+            "parser_valid": bool(parser and parser.info.valid),
+            "parser_started": bool(parser and parser.started),
+            "decoder_active": self.decoder is not None,
+            "decoder_running": bool(self.decoder and self.decoder.is_running),
+            "frame_age": (time.time() - self.last_frame_wall) if self.last_frame_wall else None,
+            "bytes_per_sec": self.bytes_per_sec,
+            "fps": self.fps,
+            "error": self.error,
+        }
+
+    def diagnostics(self) -> dict:
+        parser = self.parser
+        return {
+            "http": {"ok": self.http_ok, "status": self.http_status,
+                     "content_type": self.http_content_type},
+            "bytes_seen": parser.bytes_seen if parser else 0,
+            "bytes_per_sec": self.bytes_per_sec,
+            "first_byte_wall": self.first_byte_wall,
+            "last_chunk_wall": self.last_chunk_wall,
+            "decoder_block_reason": self.decoder_block_reason,
+            "decoder": None if self.decoder is None else {
+                "codec": self.decoder.codec, "width": self.decoder.width,
+                "height": self.decoder.height, "running": self.decoder.is_running,
+                "frames_out": self.decoder.frames_out, "dropped": self.decoder.dropped,
+                "bytes_in": self.decoder.bytes_in, "decode_fps": self.decoder.decode_fps,
+                "last_error": self.decoder.last_error,
+                "stderr_tail": list(self.decoder.stderr_tail)[-8:],
+            },
+            "parser": parser.diagnostics_snapshot() if parser else None,
+            "error": self.error,
+        }
+
+    # ---- internals -----------------------------------------------------------
+    @staticmethod
+    def _metadata_usable(info) -> tuple[bool, str]:
+        if not info.width or not info.height:
+            return False, "dimensions unknown (VID0 not parsed yet)"
+        if not (64 <= info.width <= 8192 and 64 <= info.height <= 8192):
+            return False, f"implausible dimensions {info.width}x{info.height}"
+        if info.width % 2 or info.height % 2:
+            return False, f"odd dimensions {info.width}x{info.height}"
+        return True, ""
+
+    def _on_http_response(self, status: int, headers: dict) -> None:
+        self.http_status = status
+        self.http_content_type = headers.get("Content-Type", "")
+        self.http_ok = status in (200, 206)
+
     def _run(self) -> None:
         from ..stream.parser import Gear360ChunkParser, iter_camera_bytes
 
         parser = Gear360ChunkParser()
         self.parser = parser
         try:
-            for chunk in iter_camera_bytes(self._cfg, self._stop):
+            for chunk in iter_camera_bytes(self._cfg, self._stop, on_response=self._on_http_response):
+                if not self.first_byte_wall:
+                    self.first_byte_wall = time.time()
+                    LOG.info("STREAM: first bytes after connect (%.2fs)",
+                             self.first_byte_wall - max(self.first_byte_wall, 0))
+                self.last_chunk_wall = time.time()
                 frames = parser.feed(chunk)
-                if parser.info.width and self.decoder is None:
-                    self.decoder = FFmpegDecoder(
-                        parser.info.codec_name, parser.info.width, parser.info.height,
-                        ffmpeg_path=self.ffmpeg_path,
-                    )
-                    self.decoder.start()
-                    LOG.info(
-                        "Decoder online: %s %sx%s", parser.info.codec_name,
-                        parser.info.width, parser.info.height,
-                    )
+
+                now = time.time()
+                if now - self._last_sample > 0.5:
+                    self._last_sample = now
+                    self._bytes_window.append((now, parser.bytes_seen))
+
+                if self.decoder is None and not self.decoder_block_reason and parser.info.width:
+                    ok, reason = self._metadata_usable(parser.info)
+                    if ok:
+                        if not parser.info.valid:
+                            LOG.warning("DECODER: metadata suspect (subtag_ok=%s) — "
+                                        "proceeding with plausible dims",
+                                        parser.info.subtag_ok)
+                        self.decoder = FFmpegDecoder(
+                            parser.info.codec_name, parser.info.width, parser.info.height,
+                            ffmpeg_path=self.ffmpeg_path,
+                        )
+                        self.decoder.start()
+                        LOG.info("DECODER: online %s %sx%s @%.3ffps scale=%s",
+                                 parser.info.codec_name, parser.info.width,
+                                 parser.info.height, parser.info.frame_rate,
+                                 parser.info.timestamp_scale)
+                    else:
+                        self.decoder_block_reason = reason
+                        LOG.error("DECODER: blocked — %s (raw dims %sx%s, "
+                                  "subtag_ok=%s, scale=%s, fps=%.3f)",
+                                  reason, parser.info.width, parser.info.height,
+                                  parser.info.subtag_ok, parser.info.timestamp_scale,
+                                  parser.info.frame_rate)
                 if self.decoder is None:
                     continue
                 for frame in frames:
