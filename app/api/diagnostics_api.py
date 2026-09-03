@@ -3,6 +3,7 @@ decoder, capture samples and export reports. Every endpoint is exception-
 isolated and never disturbs the live pipeline."""
 from __future__ import annotations
 
+import json
 import time
 
 from fastapi import APIRouter, HTTPException, Query
@@ -29,6 +30,13 @@ def _hub():
 
 def _registry():
     return diag.get_registry()
+
+
+def _jsonsafe(payload) -> Response:
+    """Serialize any diagnostics payload; never 500 on evidence objects.
+    (json.dumps default=str keeps bytes/deques representable.)"""
+    return Response(content=json.dumps(payload, default=str),
+                    media_type="application/json")
 
 
 def _runner():
@@ -96,7 +104,9 @@ def diag_status():
 @router.get("/latest")
 def diag_latest():
     s = _registry().latest()
-    return {"session": s}
+    # _jsonsafe: a diagnostic session must always be downloadable even if a
+    # probe leaked a non-JSON value (never hide evidence behind a 500)
+    return _jsonsafe({"session": s})
 
 
 @router.get("/sessions/{sid}")
@@ -104,7 +114,7 @@ def diag_session(sid: str):
     s = _registry().get(sid)
     if not s:
         raise HTTPException(404, "session not found")
-    return {"session": s}
+    return _jsonsafe({"session": s})
 
 
 # ---- byte-level inspectors ----------------------------------------------------
@@ -117,7 +127,13 @@ def diag_inspector(source: str = "auto", name: str = ""):
                     "note": "no stream data — connect the camera or capture a sample"}
         rep = first_bytes_report(data)
         p = _hub().camera._pipeline
-        rep["http"] = p.diagnostics()["http"] if p else {}
+        if p is not None:
+            diag = p.diagnostics()
+            rep["http"] = diag.get("http", {})
+            rep["transport"] = diag.get("transport", {})
+        else:
+            rep["http"] = {}
+            rep["transport"] = None
         rep["source"] = src
         return {"source": src, "inspector": rep}
     except Exception as exc:

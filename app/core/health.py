@@ -47,8 +47,13 @@ class HealthStateMachine:
                 "detail": f"HTTP {s.get('http_status')}" if s.get("http_status") else "no response yet",
             },
             "stream": {
-                "state": "ok" if (s.get("bytes_seen") or 0) > 0 else "fail",
-                "detail": f"{s.get('bytes_seen') or 0} bytes · {s.get('bytes_per_sec') or 0} B/s",
+                "state": "ok" if (s.get("bytes_seen") or 0) > 0 else (
+                    "warn" if s.get("transport_status") == "stalled" else "fail"),
+                "detail": (
+                    f"{s.get('bytes_seen') or 0} bytes · {s.get('bytes_per_sec') or 0} B/s"
+                    if (s.get("bytes_seen") or 0) > 0
+                    else ("headers received, body stalled" if s.get("transport_status") == "stalled"
+                          else "no stream bytes yet")),
             },
             "parser": {
                 "state": "ok" if (s.get("chunks_seen") or 0) > 0 else ("fail" if (s.get("bytes_seen") or 0) > 0 else "unknown"),
@@ -87,6 +92,8 @@ class HealthStateMachine:
             new, reason = "PARSING", "chunks parsed" + ("" if s.get("parser_valid") else " (metadata invalid)")
         elif s.get("http_ok") and (s.get("bytes_seen") or 0) > 0:
             new, reason = "STREAMING", "bytes flowing, no chunks yet"
+        elif s.get("transport_status") == "stalled":
+            new, reason = "RECONNECTING", "camera sends headers but never a body — retrying with backoff"
         elif s.get("http_ok") or s.get("camera_reachable"):
             new, reason = "CONNECTED", "transport connected, no stream bytes yet"
         elif self.state in ("STREAMING", "PARSING", "DECODING", "READY"):

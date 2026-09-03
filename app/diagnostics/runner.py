@@ -17,7 +17,7 @@ from .inspectors import (analyze_vid0, detect_container, first_bytes_report,
                          hexdump_rows, scan_signatures, validate_structure)
 from .models import (STATUS_FAIL, STATUS_PASS, STATUS_UNTESTED, STATUS_WARN,
                      PIPELINE_STAGES, StepResult)
-from .probes import http_probe, icmp_ping, tcp_ping
+from .probes import http_probe_variants, icmp_ping, tcp_ping
 from .report import build_zip
 
 LOG = get("app")
@@ -119,17 +119,34 @@ class DiagnosticsRunner:
             return sr
         run("tcp_connect", "TCP connectivity", s_tcp)
 
-        # 3+4+5 — HTTP
-        probe_res = {}
+        # 3+4+5 — HTTP: one variant matrix feeds all three steps (single cost)
 
         def s_http(sr: StepResult) -> StepResult:
-            res = http_probe(host, port, path, max_bytes=262_144)
-            probe_res.update(res)
-            ctx["http"] = res
-            sr.status = STATUS_PASS if res.get("ok") else STATUS_FAIL
-            sr.detail = (f"HTTP {res.get('status')} · {res.get('bytes_read')}B · "
-                         f"{res.get('content_type') or '?'}") if not res.get("error") else res["error"]
-            sr.evidence = {k: res.get(k) for k in ("url", "status", "content_type", "bytes_read", "error")}
+            res = http_probe_variants(host, port, path)
+            ctx["http_variants"] = res
+            ctx["http"] = dict(res.get("best") or {})
+            if not res.get("any_data"):
+                if res.get("all_stalled"):
+                    sr.status = STATUS_FAIL
+                    sr.detail = ("camera answered headers on every request style but "
+                                 "streamed zero body bytes (all variants stalled)")
+                else:
+                    sr.status = STATUS_FAIL
+                    sr.detail = "no request style produced body bytes"
+            else:
+                best = res["best"]
+                sr.status = STATUS_PASS
+                sr.detail = (f"HTTP {best.get('status')} · {best.get('bytes_read')}B via "
+                             f"style={best.get('variant')}")
+            sr.evidence = {
+                "variants": [
+                    {k: v.get(k) for k in ("variant", "path", "status", "content_type",
+                                           "bytes_read", "elapsed_ms", "error")}
+                    for v in res.get("variants", [])
+                ],
+                "any_data": res.get("any_data"),
+                "all_stalled": res.get("all_stalled"),
+            }
             return sr
         run("http_connect", "HTTP connection", s_http)
 
@@ -140,24 +157,40 @@ class DiagnosticsRunner:
                 return
             sr.status = STATUS_PASS if res.get("status") in (200, 206) else STATUS_FAIL
             sr.detail = f"status={res.get('status')} content-type={res.get('content_type')}"
-            sr.evidence = {"headers": res.get("headers", {})}
+            sr.evidence = {"headers": res.get("headers", {}),
+                           "variant": res.get("variant")}
             ctx["headers"] = res.get("headers", {})
             return sr
         run("http_headers", "HTTP headers", s_headers)
 
         def s_read(sr: StepResult) -> StepResult:
-            if not ctx.get("http"):
+            res = ctx.get("http") or {}
+            if not res:
                 skip("stream_read", "Stream read", "HTTP probe did not run")
                 return
-            res = http_probe(host, port, path, max_bytes=2 * 1024 * 1024)
-            ctx["http"] = res
-            sr.status = STATUS_PASS if res.get("bytes_read", 0) > 0 else STATUS_FAIL
+            got = res.get("bytes_read", 0)
+            sr.status = STATUS_PASS if got > 0 else STATUS_FAIL
             rate = res.get("bytes_per_sec")
-            sr.detail = (f"{res.get('bytes_read')} bytes in {res.get('elapsed_ms')}ms"
+            sr.detail = (f"{got} bytes in {res.get('elapsed_ms')}ms (style={res.get('variant')})"
                          + (f" · {rate} B/s" if rate else ""))
-            sr.evidence = {k: res.get(k) for k in ("bytes_read", "elapsed_ms", "bytes_per_sec", "error")}
+            sr.evidence = {k: res.get(k) for k in ("bytes_read", "elapsed_ms", "bytes_per_sec",
+                                                   "variant", "error")}
             return sr
-        run("stream_read", "Stream read (2MB)", s_read)
+        run("stream_read", "Stream read", s_read)
+
+        # analysis source fallback #2: bytes captured by the probe itself —
+        # lets container/chunk/VID0 analysis work even when the Hub app is
+        # idle (exactly the situation in report DG-20260903-001)
+        if not has_data:
+            best = (ctx.get("http_variants") or {}).get("best") or {}
+            hex_head = best.get("head_hex") or ""
+            if len(hex_head) >= 32:
+                try:
+                    data = bytes.fromhex(hex_head)
+                    source_name = f"probe:{best.get('variant')}"
+                    has_data = len(data) >= 16
+                except ValueError:
+                    pass
 
         # source-based analysis
         def s_first_bytes(sr: StepResult) -> StepResult:
@@ -438,6 +471,7 @@ class DiagnosticsRunner:
             "summary": summary,
             "live": live_snap,
             "http": ctx.get("http"),
+            "http_variants": ctx.get("http_variants"),
             "tcp": ctx.get("tcp"),
             "icmp": ctx.get("icmp"),
             "scan": ctx.get("scan"),

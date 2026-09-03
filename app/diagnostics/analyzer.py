@@ -47,6 +47,26 @@ def analyze_findings(ctx: dict) -> list[Finding]:
             error_code="HTTP_STREAM_ERROR",
         ).to_dict())
 
+    # R11 — request-style matrix: headers but no body on EVERY style/endpooint
+    variants = (ctx.get("http_variants") or {})
+    if variants.get("all_stalled"):
+        rows = []
+        for v in variants.get("variants", []):
+            rows.append(f"{v.get('variant')}({v.get('path')}): HTTP {v.get('status')}, "
+                        f"{v.get('bytes_read', 0)}B — {(v.get('error') or '')[:60]}")
+        findings.append(Finding(
+            id="R11", confidence="HIGH",
+            title="Camera accepts every request style but never streams a body (session wedged or single-client limit)",
+            evidence=rows,
+            suggested_action=(
+                "1) Close the phone Gear 360 app — the camera serves ONE live-stream client. "
+                "2) Power-cycle the camera (its streaming session may be wedged by earlier "
+                "connection storms). 3) Make sure live preview is armed (open Live view once "
+                "in the phone app, then close it). 4) Connect the Hub again — it now rotates "
+                "request styles and retries with backoff automatically."),
+            error_code="CAMERA_STREAM_STALLED",
+        ).to_dict())
+
     # R3 — VID0 layout suspect (live parser metadata invalid)
     if vid0 and vid0.get("verdict") == "SUSPECT":
         fourcc = [f for f in vid0.get("fields", []) if f.get("verdict") == "FOURCC"]

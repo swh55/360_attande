@@ -33,6 +33,8 @@ class CameraManager:
         self._lock = threading.Lock()
         self._stop_probe = threading.Event()
         self._probe_thread: Optional[threading.Thread] = None
+        self._stop_state = threading.Event()
+        self._state_thread: Optional[threading.Thread] = None
         self.started_at = 0.0
         self.reconnects = 0
         self.error_count = 0
@@ -69,6 +71,7 @@ class CameraManager:
             "fps": p.fps if p else 0.0,
             "encoded_frames": p.encoded_frames if p else 0,
             "decoded_frames": p.decoded_frames if p else 0,
+            "transport": (p.diagnostics().get("transport") if p else None),
             "uptime_sec": round(time.time() - self.started_at, 1) if self.started_at else 0,
             "error_count": self.error_count,
             "reconnects": self.reconnects,
@@ -104,6 +107,7 @@ class CameraManager:
             self.started_at = time.time()
             self._pipeline = StreamPipeline(self.bus, ffmpeg_path=ff.path)
             self._pipeline.start(cfg)
+            self._ensure_state_loop()
             LOG.info("Connect requested -> %s:%s%s", cfg["host"], cfg["port"], cfg["stream_path"])
             db.execute(
                 "INSERT INTO system_logs (ts, level, domain, message) "
@@ -122,6 +126,7 @@ class CameraManager:
                 self._pipeline = None
             self.state = "disconnected"
             self.started_at = 0.0
+            self._stop_state.set()
             LOG.info("Disconnected by user")
             event_bus.publish("camera_state", {"state": "disconnected"})
         return self.info()
@@ -161,6 +166,46 @@ class CameraManager:
         return out
 
     # ---- internals ---------------------------------------------------------
+    def _ensure_state_loop(self) -> None:
+        """Periodic state sync: transport reality -> camera state for the UI.
+
+        CONNECTED (headers) is NOT STREAM READY is NOT FRAME READY — the UI
+        must see the difference, e.g. 'headers but no body' stalls.
+        """
+        if self._state_thread is None or not self._state_thread.is_alive():
+            self._stop_state.clear()
+            self._state_thread = threading.Thread(target=self._state_loop, name="camera-state", daemon=True)
+            self._state_thread.start()
+
+    def _state_loop(self) -> None:
+        while not self._stop_state.wait(1.5):
+            p = self._pipeline
+            if p is None:
+                return
+            fresh_chunks = p.last_chunk_wall and (time.time() - p.last_chunk_wall) < 3.0
+            if p.error:
+                if self.state != "error":
+                    self.state = "error"
+                    self.error = p.error
+                    self.error_count += 1
+                    event_bus.publish("camera_state", {"state": "error", "error": p.error})
+            elif fresh_chunks:
+                if self.state != "streaming":
+                    self.state = "streaming"
+                    event_bus.publish("camera_state", {"state": "streaming"})
+                    LOG.info("Streaming")
+            elif p.transport_status in ("stalled", "error"):
+                if self.state != "reconnecting":
+                    self.state = "reconnecting"
+                    self.error = None
+                    event_bus.publish("camera_state", {
+                        "state": "reconnecting",
+                        "transport": p.transport_status,
+                        "stalled": p.stalled_attempts_total,
+                    })
+            elif self.state not in ("connecting", "streaming", "reconnecting", "error"):
+                self.state = "connecting"
+
     def _refresh_state(self) -> None:
         p = self._pipeline
         if p is None:

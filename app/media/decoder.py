@@ -179,7 +179,16 @@ class StreamPipeline:
         self.http_content_type = ""
         self.first_byte_wall = 0.0
         self.last_chunk_wall = 0.0
+        self.connect_wall = 0.0
         self.decoder_block_reason: Optional[str] = None
+        # transport observability (fed by iter_camera_bytes on_event)
+        self.transport_status = "idle"   # idle|connecting|headers|data|stalled|error
+        self.last_transport_event: dict = {}
+        self.stall_events = 0
+        self.stalled_attempts_total = 0
+        self.transport_retries = 0
+        self.reconnects = 0
+        self.last_transport_error = ""
         self._fps_window: deque[float] = deque(maxlen=120)
         self._bytes_window: deque[tuple] = deque(maxlen=240)
         self._last_sample = 0.0
@@ -230,6 +239,7 @@ class StreamPipeline:
         return {
             "http_ok": self.http_ok,
             "http_status": self.http_status,
+            "transport_status": self.transport_status,
             "bytes_seen": parser.bytes_seen if parser else 0,
             "chunks_seen": parser.chunks_seen if parser else 0,
             "parser_valid": bool(parser and parser.info.valid),
@@ -247,6 +257,15 @@ class StreamPipeline:
         return {
             "http": {"ok": self.http_ok, "status": self.http_status,
                      "content_type": self.http_content_type},
+            "transport": {
+                "status": self.transport_status,
+                "last_event": dict(self.last_transport_event),
+                "stall_events": self.stall_events,
+                "stalled_attempts_total": self.stalled_attempts_total,
+                "retries": self.transport_retries,
+                "reconnects": self.reconnects,
+                "last_error": self.last_transport_error,
+            },
             "bytes_seen": parser.bytes_seen if parser else 0,
             "bytes_per_sec": self.bytes_per_sec,
             "first_byte_wall": self.first_byte_wall,
@@ -279,6 +298,31 @@ class StreamPipeline:
         self.http_status = status
         self.http_content_type = headers.get("Content-Type", "")
         self.http_ok = status in (200, 206)
+        self.connect_wall = time.time()
+
+    def _on_transport_event(self, etype: str, **detail) -> None:
+        self.last_transport_event = {"type": etype, "ts": round(time.time(), 3), **detail}
+        if etype == "connect":
+            self.transport_status = "connecting"
+        elif etype == "headers":
+            self.transport_status = "headers"
+        elif etype == "data":
+            self.transport_status = "data"
+        elif etype == "stalled":
+            self.transport_status = "stalled"
+            self.stall_events += 1
+            self.stalled_attempts_total = detail.get("stalled_total", self.stall_events)
+        elif etype == "interrupted":
+            self.transport_status = "error"
+            self.last_transport_error = detail.get("error", "")
+            self.transport_retries += 1
+            self.reconnects += 1
+        elif etype == "eof":
+            self.transport_retries += 1
+            self.reconnects += 1
+        elif etype == "stall_persist":
+            LOG.error("TRANSPORT: persistent headers-without-body (attempts=%s) — see earlier guidance",
+                      detail.get("attempts"))
 
     def _run(self) -> None:
         from ..stream.parser import Gear360ChunkParser, iter_camera_bytes
@@ -286,11 +330,13 @@ class StreamPipeline:
         parser = Gear360ChunkParser()
         self.parser = parser
         try:
-            for chunk in iter_camera_bytes(self._cfg, self._stop, on_response=self._on_http_response):
+            for chunk in iter_camera_bytes(self._cfg, self._stop,
+                                           on_response=self._on_http_response,
+                                           on_event=self._on_transport_event):
                 if not self.first_byte_wall:
                     self.first_byte_wall = time.time()
-                    LOG.info("STREAM: first bytes after connect (%.2fs)",
-                             self.first_byte_wall - max(self.first_byte_wall, 0))
+                    wait = (self.first_byte_wall - self.connect_wall) if self.connect_wall else 0.0
+                    LOG.info("STREAM: first stream bytes after %.2fs", wait)
                 self.last_chunk_wall = time.time()
                 frames = parser.feed(chunk)
 

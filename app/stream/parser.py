@@ -500,29 +500,91 @@ class Gear360ChunkParser:
         )
 
 
-def iter_camera_bytes(cfg: dict, stop_event: threading.Event,
-                      on_response=None) -> Generator[bytes, None, None]:
-    """Yield raw bytes from the camera live-preview HTTP endpoint with retries.
+class BackoffPolicy:
+    """Exponential reconnect backoff that resets after a productive attempt.
 
-    `on_response(status, headers)` is called once per HTTP attempt so callers
-    can track transport state without parsing the byte flow.
+    History: the first implementation retried every `reconnect_seconds` (1s),
+    which hammered an unreachable camera with a SYN every ~4s for minutes
+    (see stream.log 2026-09-03 00:23-00:30) and can wedge the camera's
+    single-session HTTP server. We now double the delay per consecutive
+    failed attempt and reset it once bytes actually flowed.
+    """
+
+    def __init__(self, base: float = 1.0, factor: float = 2.0, max_delay: float = 15.0):
+        self.base = float(base)
+        self.factor = float(factor)
+        self.max_delay = float(max_delay)
+        self.failed_attempts = 0
+
+    def next_delay(self) -> float:
+        self.failed_attempts += 1
+        return min(self.base * (self.factor ** max(0, self.failed_attempts - 1)),
+                   self.max_delay)
+
+    def reset(self) -> None:
+        self.failed_attempts = 0
+
+
+# Request styles rotated across connection attempts. Real Gear 360 units
+# answered "Range: bytes=0-" with 206 + body historically; if a session
+# wedges, rotating the style empirically tests whether style is the trigger.
+REQUEST_STYLES = (
+    ("range", {"Range": "bytes=0-"}),
+    ("plain", {}),
+    ("close", {"Range": "bytes=0-", "Connection": "close"}),
+)
+
+
+def iter_camera_bytes(cfg: dict, stop_event: threading.Event,
+                      on_response=None, on_event=None) -> Generator[bytes, None, None]:
+    """Yield raw bytes from the camera live-preview HTTP endpoint.
+
+    Transport behaviour:
+      * rotates request styles across attempts (range / plain / close);
+      * treats "headers received but zero body bytes before the read window
+        closed" as a STALLED attempt: closes the socket and retries (a fresh
+        request often kick-starts a wedged camera streaming session);
+      * applies exponential reconnect backoff, reset once bytes flow;
+      * emits transport events via `on_event(type, **detail)` so the pipeline
+        and diagnostics can show CONNECTION/HEADERS/STALLED/DATA/RETRY states.
+
+    `on_response(status, headers)` is kept for backwards compatibility.
     """
     import requests
+
+    def emit(etype: str, **detail) -> None:
+        if on_event is not None:
+            try:
+                on_event(etype, **detail)
+            except Exception:
+                LOG.debug("on_event callback failed", exc_info=True)
 
     host = cfg["host"]
     port = int(cfg["port"])
     path = cfg.get("path", "/livestream_high.avi")
     timeout = float(cfg.get("request_timeout_seconds", 8))
-    reconnect = float(cfg.get("reconnect_seconds", 1))
+    reconnect = max(0.5, float(cfg.get("reconnect_seconds", 1)))
     url = f"http://{host}:{port}{path}"
     session = requests.Session()
-    session.headers.update({"User-Agent": "Gear360Hub/1.0", "Accept": "*/*"})
+    session.headers.update({"User-Agent": "Gear360Hub/1.1", "Accept": "*/*"})
+    backoff = BackoffPolicy(base=reconnect)
+    attempt = 0
+    stalled_attempts = 0
     while not stop_event.is_set():
+        attempt += 1
+        style_name, style_headers = REQUEST_STYLES[(attempt - 1) % len(REQUEST_STYLES)]
+        headers = {"User-Agent": session.headers["User-Agent"], "Accept": "*/*", **style_headers}
+        bytes_in_attempt = 0
+        t0 = time.time()
+        emit("connect", attempt=attempt, style=style_name, url=url)
         try:
-            LOG.info("Connecting to %s", url)
-            with session.get(url, stream=True, timeout=(3, timeout), headers={"Range": "bytes=0-"}) as r:
+            LOG.info("STREAM: attempt=%d style=%s connecting to %s", attempt, style_name, url)
+            with session.get(url, stream=True, timeout=(3, timeout), headers=headers) as r:
                 r.raise_for_status()
-                LOG.info("STREAM: HTTP %s, Content-Type=%s", r.status_code, r.headers.get("Content-Type"))
+                LOG.info("STREAM: attempt=%d HTTP %s, Content-Type=%s",
+                         attempt, r.status_code, r.headers.get("Content-Type"))
+                emit("headers", attempt=attempt, style=style_name,
+                     status=r.status_code, content_type=r.headers.get("Content-Type", ""))
                 if on_response is not None:
                     try:
                         on_response(r.status_code, dict(r.headers))
@@ -532,8 +594,36 @@ def iter_camera_bytes(cfg: dict, stop_event: threading.Event,
                     if stop_event.is_set():
                         return
                     if chunk:
+                        if bytes_in_attempt == 0:
+                            emit("data", attempt=attempt, style=style_name,
+                                 first_byte_after=round(time.time() - t0, 2))
+                            backoff.reset()
+                            if stalled_attempts:
+                                LOG.info("STREAM: stream recovered after %d stalled attempt(s)",
+                                         stalled_attempts)
+                            stalled_attempts = 0
+                        bytes_in_attempt += len(chunk)
                         yield chunk
+                # server closed the body cleanly
+                emit("eof", attempt=attempt, style=style_name, bytes=bytes_in_attempt)
+                LOG.info("STREAM: attempt=%d server closed body after %d bytes",
+                         attempt, bytes_in_attempt)
         except Exception as exc:
-            LOG.warning("Camera stream ended: %s", exc)
-            if stop_event.wait(reconnect):
+            kind = "stalled" if bytes_in_attempt == 0 else "interrupted"
+            if bytes_in_attempt == 0:
+                stalled_attempts += 1
+            delay = backoff.next_delay()
+            LOG.warning("STREAM: attempt=%d style=%s %s after %.1fs (%d bytes): %s — retry in %.1fs",
+                        attempt, style_name, kind, time.time() - t0, bytes_in_attempt, exc, delay)
+            emit(kind, attempt=attempt, style=style_name, error=str(exc),
+                 bytes=bytes_in_attempt, retry_in=delay, stalled_total=stalled_attempts)
+            if kind == "stalled" and stalled_attempts == 3:
+                LOG.error(
+                    "STREAM: camera sent headers but never streamed a body in %d attempts. "
+                    "Likely causes: (1) camera streaming session wedged — power-cycle the "
+                    "camera; (2) the phone Gear 360 app still holds the single live-stream "
+                    "session — close it; (3) live preview not armed on the camera.",
+                    stalled_attempts)
+                emit("stall_persist", attempts=stalled_attempts)
+            if stop_event.wait(delay):
                 return

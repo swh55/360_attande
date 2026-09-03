@@ -40,12 +40,13 @@ def classify(message: str, stage: str) -> dict:
             break
     retryable = code in {
         "NETWORK_ERROR", "CAMERA_UNREACHABLE", "HTTP_STREAM_ERROR",
-        "FRAME_BUFFER_EMPTY", "SNAPSHOT_ERROR",
+        "CAMERA_STREAM_STALLED", "FRAME_BUFFER_EMPTY", "SNAPSHOT_ERROR",
     }
     fixes = {
         "NETWORK_ERROR": "Check the camera Wi-Fi/hotspot and this machine's network.",
         "CAMERA_UNREACHABLE": "Verify the camera is powered, on its Wi-Fi, and the IP/port are correct in Settings.",
         "HTTP_STREAM_ERROR": "Confirm the stream path (/livestream_high.avi) and that no other client holds the live stream.",
+        "CAMERA_STREAM_STALLED": "Camera sends headers but never a body: power-cycle the camera, close the phone Gear 360 app (it holds the single live-stream session), and re-arm live preview; then Connect again.",
         "STREAM_FORMAT_ERROR": "Capture a stream sample and inspect the container signatures.",
         "CHUNK_PARSE_ERROR": "Run the chunk scanner — compare parser offsets with TecCheck Extractor.kt.",
         "VID0_PARSE_ERROR": "Open Parser Details — verify VID0 field offsets against Extractor.kt.",

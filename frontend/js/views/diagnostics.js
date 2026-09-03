@@ -152,6 +152,10 @@ export async function renderDiagnostics(container) {
       if (!r.inspector) { box.innerHTML = `<span class="subtle">${esc(r.note || "—")}</span>`; return; }
       const ins = r.inspector;
       const http = ins.http || {};
+      const tp = ins.transport || null;
+      const tpRows = !tp ? "" : `
+        <div class="kv"><span>transport</span><b>${esc(tp.status || "—")}${tp.stall_events ? ` · ⚠ stalls=${esc(tp.stall_events)}` : ""}${tp.retries ? ` · retries=${esc(tp.retries)}` : ""}</b></div>
+        ${tp.last_event && tp.last_event.type ? `<div class="kv"><span>last event</span><b class="mono" style="font-size:11px">${esc(tp.last_event.type)} · ${esc(JSON.stringify(tp.last_event).slice(0, 120))}</b></div>` : ""}`;
       const sigRows = (ins.signatures?.signatures || []).map((s) =>
         `<span class="badge accent mono" style="margin:2px">${esc(s.sig)} @0x${Number(s.offset).toString(16)}</span>`).join("");
       const hexRows = (ins.first_256 || []).slice(0, 8).map((row) =>
@@ -160,6 +164,7 @@ export async function renderDiagnostics(container) {
         <div class="kv"><span>source</span><b class="mono">${esc(r.source)}</b></div>
         <div class="kv"><span>HTTP status</span><b>${esc(http.status ?? "—")}</b></div>
         <div class="kv"><span>Content-Type</span><b class="mono">${esc(http.content_type || "—")}</b></div>
+        ${tpRows}
         <div class="kv"><span>container</span><b>${esc(ins.signatures?.kind || "—")}</b></div>
         <div class="kv"><span>${t("diag.signatures")}</span><b>${sigRows || "—"}</b></div>
         <pre class="hexbox" style="max-height:150px; margin-top:8px">${esc(hexRows)}</pre>`;

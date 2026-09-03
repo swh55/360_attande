@@ -30,7 +30,10 @@ def build_report(hub, session: dict) -> dict:
     ]
     live = session.get("live") or {}
     http = session.get("http") or {}
+    variants = session.get("http_variants") or {}
     tcp = session.get("tcp") or {}
+    p = hub.camera._pipeline
+    transport = p.diagnostics().get("transport") if p is not None else None
     return {
         "generated_at": session.get("finished_at"),
         "session_id": session.get("id"),
@@ -58,7 +61,17 @@ def build_report(hub, session: dict) -> dict:
                     "icmp": session.get("icmp")},
         "http": {k: http.get(k) for k in
                  ("url", "status", "content_type", "bytes_read", "elapsed_ms",
-                  "bytes_per_sec", "error")},
+                  "bytes_per_sec", "variant", "stalled", "error")},
+        "http_variants": {
+            "any_data": variants.get("any_data"),
+            "all_stalled": variants.get("all_stalled"),
+            "variants": [
+                {k: v.get(k) for k in ("variant", "path", "status", "content_type",
+                                       "bytes_read", "elapsed_ms", "error")}
+                for v in variants.get("variants", [])
+            ],
+        },
+        "transport": transport,
         "stream": {"bytes_seen": live.get("bytes_seen"),
                    "chunks_seen": live.get("chunks_seen"),
                    "resyncs": live.get("resyncs"),
