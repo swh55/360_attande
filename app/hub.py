@@ -10,6 +10,7 @@ from .camera.manager import CameraManager
 from .core import database as db
 from .core import settings as settings_svc
 from .core.bus import bus as event_bus
+from .core.health import HealthStateMachine
 from .core.logging_setup import get, setup_logging
 from .core.paths import ensure_dirs
 from .events.store import EventStore
@@ -81,6 +82,7 @@ class Hub:
         self.store = EventStore()
         self.recorder = RecordingManager(self.bus, self.ffmpeg)
         self.snapshots = SnapshotManager(self.bus)
+        self.health_machine = HealthStateMachine()
         self.demo: Optional[DemoSource] = None
         self.ai: Optional[AIEngine] = None
         self.ws = WebSocketHub()
@@ -102,6 +104,9 @@ class Hub:
         self.ai.start()
         event_bus.subscribe("event", self._on_event)
         settings_svc.on_change(self._on_setting_change)
+        # clear the stop event so a restarted lifecycle (e.g. a second TestClient
+        # lifespan in the same process) gets a live state loop again
+        self._stop.clear()
         self._state_thread = threading.Thread(target=self._state_loop, name="hub-state", daemon=True)
         self._state_thread.start()
         self.apply_mode()
@@ -165,6 +170,37 @@ class Hub:
         if self.bus.latest() is None:
             return
 
+    # ---- health ---------------------------------------------------------------
+    def _health_signals(self) -> dict:
+        p = self.camera._pipeline
+        sig = p.signals() if p is not None else {}
+        latest = self.bus.latest()
+        return {
+            "mode": self.mode,
+            "camera_state": self.camera.state,
+            "camera_reachable": self.camera.camera_reachable,
+            "latency_ms": self.camera.last_latency_ms,
+            "http_ok": sig.get("http_ok", False),
+            "http_status": sig.get("http_status"),
+            "bytes_seen": sig.get("bytes_seen", 0),
+            "chunks_seen": sig.get("chunks_seen", 0),
+            "resyncs": sig.get("resyncs", 0),
+            "parser_valid": sig.get("parser_valid", False),
+            "decoder_active": sig.get("decoder_active", False),
+            "decoder_running": sig.get("decoder_running", False),
+            "frame_age": (time.time() - latest.wall_time) if latest else None,
+            "bytes_per_sec": sig.get("bytes_per_sec", 0),
+            "error": sig.get("error") or (self.camera.error if self.camera.state == "error" else None),
+        }
+
+    def pipeline_view(self) -> dict:
+        view = self.health_machine.view()
+        p = self.camera._pipeline
+        view["fps"] = self._pipeline_fps()
+        view["bytes_per_sec"] = p.bytes_per_sec if p is not None else 0
+        view["mode"] = self.mode
+        return view
+
     # ---- state broadcast -------------------------------------------------------
     def state_snapshot(self) -> dict:
         h = w = fps = 0
@@ -175,11 +211,12 @@ class Hub:
         return {
             "type": "state",
             "mode": self.mode,
-            "app": {"version": "1.0.0", "uptime": round(time.time() - self.started_at, 1)},
+            "app": {"version": "1.1.0", "uptime": round(time.time() - self.started_at, 1)},
             "camera": self.camera.info(),
             "stream": {"fps": fps, "width": w, "height": h,
                        "frames_published": self.bus.published,
                        "source": self.bus.source},
+            "pipeline": self.pipeline_view(),
             "recording": self.recording_status(),
             "ai": self.ai.status() if self.ai else {"enabled": False},
             "health": self.health(),
@@ -245,6 +282,7 @@ class Hub:
         while not self._stop.wait(1.0 / max(0.5, rate)):
             try:
                 self.apply_mode()  # react to setting changes each tick
+                self.health_machine.evaluate(self._health_signals())
                 snap = self.state_snapshot()
                 self.ws.publish_threadsafe(snap)
             except Exception:

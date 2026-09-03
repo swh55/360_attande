@@ -8,12 +8,13 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from .api.camera_api import router as camera_router
+from .api.diagnostics_api import router as diagnostics_router
 from .api.hub_api import router as hub_router
 from .core import database as db
 from .core import settings as settings_svc
@@ -34,7 +35,7 @@ async def lifespan(app: FastAPI):
 def create_app() -> FastAPI:
     app = FastAPI(
         title="Gear360 Hub",
-        version="1.0.0",
+        version="1.1.0",
         description="Smart Open Platform for Samsung Gear 360 (SM-R210)",
         lifespan=lifespan,
     )
@@ -48,11 +49,12 @@ def create_app() -> FastAPI:
 
     app.include_router(camera_router)
     app.include_router(hub_router)
+    app.include_router(diagnostics_router)
 
     @app.get("/api/about")
     def about():
         return {"name": "Gear360 Hub", "tagline": "Smart Open Platform for Samsung Gear 360",
-                "version": "1.0.0"}
+                "version": "1.1.0"}
 
     # ---- frontend (offline-first, served locally) -------------------------
     if FRONTEND_DIR.exists():
@@ -67,7 +69,7 @@ def create_app() -> FastAPI:
             f = FRONTEND_DIR / "assets" / "favicon.svg"
             if f.exists():
                 return FileResponse(f, media_type="image/svg+xml")
-            return Response_404()
+            raise HTTPException_404()
     else:  # pragma: no cover
         @app.get("/", include_in_schema=False)
         def index_missing():
@@ -76,7 +78,7 @@ def create_app() -> FastAPI:
     return app
 
 
-def Response_404():
+def HTTPException_404():
     from fastapi import HTTPException
     raise HTTPException(404)
 

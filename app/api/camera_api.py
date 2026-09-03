@@ -1,15 +1,15 @@
 """Camera + Stream + Media API routers."""
 from __future__ import annotations
 
-import asyncio
 import time
 
 import cv2
 from fastapi import APIRouter, HTTPException, Query
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from ..camera.profiles import load_profiles
 from ..core import settings as settings_svc
+from ..diagnostics.errors import snapshot_error_payload
 from ..hub import get_hub
 from ..media.projections import Calibration
 from ..storage import library
@@ -55,17 +55,21 @@ def stream_status():
     hub = get_hub()
     p = hub.camera._pipeline
     parser = p.parser if p else None
+    machine = getattr(hub, "health_machine", None)
     return {
         "mode": hub.mode,
         "fps": hub._pipeline_fps(),
         "frames_published": hub.bus.published,
         "source": hub.bus.source,
         "taps": hub.bus.tap_names(),
+        "pipeline": machine.view() if machine else None,
         "parser": None if parser is None else {
             "codec": parser.info.codec_name,
             "width": parser.info.width,
             "height": parser.info.height,
             "frame_rate": parser.info.frame_rate,
+            "valid": parser.info.valid,
+            "subtag_ok": parser.info.subtag_ok,
             "chunks_seen": parser.chunks_seen,
             "resyncs": parser.resyncs,
             "bytes_seen": parser.bytes_seen,
@@ -73,7 +77,9 @@ def stream_status():
         "decoder": None if p is None or p.decoder is None else {
             "codec": p.decoder.codec, "width": p.decoder.width,
             "height": p.decoder.height, "dropped": p.decoder.dropped,
+            "frames_out": p.decoder.frames_out, "running": p.decoder.is_running,
         },
+        "decoder_block_reason": p.decoder_block_reason if p else None,
         "error": p.error if p else None,
     }
 
@@ -90,8 +96,9 @@ def stream_snapshot(
     try:
         out = hub.snapshots.capture(cal=cal, projection=projection,
                                     yaw=yaw, pitch=pitch, fov=fov)
-    except RuntimeError as exc:
-        raise HTTPException(409, str(exc))
+    except Exception as exc:
+        # structured, actionable 409 — never a bare "409 Conflict"
+        return JSONResponse(status_code=409, content=snapshot_error_payload(hub, exc))
     return out
 
 

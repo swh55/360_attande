@@ -43,3 +43,6 @@ Thumbs.db
 dev.log
 *.log
 !logs/.gitkeep
+
+# third-party reference sources (study-only, never committed)
+reference/
