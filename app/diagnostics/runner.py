@@ -127,28 +127,42 @@ class DiagnosticsRunner:
         # evidence and touch the camera with ZERO extra stream connections.
 
         def s_http(sr: StepResult) -> StepResult:
-            if p is not None and p.http_ok and live_parser is not None \
-                    and live_parser.bytes_seen > 0:
+            # The camera is single-session: while a live session EXISTS (even
+            # while it is still connecting/recovering), ANY probe connection
+            # would compete for it and can starve the live preview. Probes are
+            # only allowed when the camera is fully released (no pipeline).
+            if p is not None:
+                parser = live_parser
                 ctx["http"] = {
                     "url": f"http://{host}:{port}{path}",
                     "status": p.http_status, "content_type": p.http_content_type,
-                    "bytes_read": live_parser.bytes_seen,
+                    "bytes_read": parser.bytes_seen if parser else 0,
                     "bytes_per_sec": p.bytes_per_sec,
                     "variant": "live-pipeline (no probe connections opened)",
                     "headers": {},
                 }
                 ctx["http_variants"] = {
-                    "variants": [], "any_data": True, "all_stalled": False,
+                    "variants": [], "any_data": parser.bytes_seen > 0 if parser else False,
+                    "all_stalled": False,
                     "best": ctx["http"],
-                    "note": ("live pipeline is streaming — probe matrix skipped "
+                    "note": ("live session holds the camera — probe matrix suppressed "
                              "to keep the camera's single stream session"),
                 }
-                sr.status = STATUS_PASS
-                sr.detail = (f"live pipeline streaming: HTTP {p.http_status}, "
-                             f"{live_parser.bytes_seen}B seen, {p.bytes_per_sec} B/s "
-                             "(no probe connections opened)")
+                if p.http_ok and parser is not None and parser.bytes_seen > 0:
+                    sr.status = STATUS_PASS
+                    sr.detail = (f"live pipeline streaming: HTTP {p.http_status}, "
+                                 f"{parser.bytes_seen}B seen, {p.bytes_per_sec} B/s "
+                                 "(no probe connections opened)")
+                else:
+                    sr.status = STATUS_WARN
+                    sr.detail = (f"live session active (state={hub.camera.state}, "
+                                 f"transport={p.transport_status}, "
+                                 f"{parser.bytes_seen if parser else 0}B seen) — "
+                                 "probes suppressed to protect the live session")
                 sr.evidence = {"source": "live-pipeline",
-                               "bytes_seen": live_parser.bytes_seen,
+                               "camera_state": hub.camera.state,
+                               "transport": p.transport_status,
+                               "bytes_seen": parser.bytes_seen if parser else 0,
                                "bytes_per_sec": p.bytes_per_sec,
                                "http_status": p.http_status}
                 return sr

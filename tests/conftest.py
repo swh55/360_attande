@@ -50,3 +50,20 @@ def real_h264_access_units():
     aus = annexb_to_access_units(proc.stdout)
     assert len(aus) >= n * 0.5, f"only {len(aus)} AUs from {len(proc.stdout)}B"
     return {"aus": aus, "width": w, "height": h}
+
+
+# shared fake camera server (moved from test_transport so all suites can use it)
+@pytest.fixture()
+def fake_server():
+    from tests.test_transport import FakeGear360Server
+
+    made = []
+
+    def _make(behaviour: str, **kw):
+        srv = FakeGear360Server(behaviour, **kw)
+        made.append(srv)
+        return srv
+
+    yield _make
+    for srv in made:
+        srv.close()

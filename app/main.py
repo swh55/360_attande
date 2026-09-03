@@ -53,8 +53,11 @@ def create_app() -> FastAPI:
 
     @app.get("/api/about")
     def about():
+        from .build_info import build_info
+        b = build_info()
         return {"name": "Gear360 Hub", "tagline": "Smart Open Platform for Samsung Gear 360",
-                "version": "1.1.0"}
+                "version": b["version"], "commit": b["commit"], "commit_short": b["commit_short"],
+                "build_time": b["build_time"], "build_source": b["source"]}
 
     # ---- frontend (offline-first, served locally) -------------------------
     if FRONTEND_DIR.exists():

@@ -15,8 +15,11 @@ export async function renderCamera(container) {
         <div class="btn-row" style="margin-bottom:14px">
           <button class="btn primary" id="btnConnect">🔗 ${t("cam.connect")}</button>
           <button class="btn" id="btnDisconnect">⛔ ${t("cam.disconnect")}</button>
+          <button class="btn" id="btnRestart">🔄 ${t("cam.restart")}</button>
+          <button class="btn accent" id="btnPhoto">📸 ${t("cam.take_photo")}</button>
           <button class="btn" id="btnTest">🧪 ${t("cam.test")}</button>
         </div>
+        <div class="kv"><span>${t("cam.phase")}</span><b id="camPhase">—</b></div>
         <div class="kv"><span>${t("cam.ip")}</span><b>${cam.config?.host}</b></div>
         <div class="kv"><span>${t("cam.port")}</span><b>${cam.config?.port}</b></div>
         <div class="kv"><span>${t("cam.stream_url")}</span><b style="font-size:11.5px; word-break:break-all">${cam.stream_url}</b></div>
@@ -30,6 +33,11 @@ export async function renderCamera(container) {
         <div class="kv"><span>${t("cam.resolution")}</span><b id="camRes">—</b></div>
       </div>
       <div class="card" id="testResult" hidden><h3>🧪 ${t("cam.test")}</h3><div id="testBody"></div></div>
+      <div class="card">
+        <h3>📊 ${t("cam.counters")}</h3>
+        <div id="counterTable" style="color:var(--text-2); font-size:12.5px">—</div>
+        <p style="color:var(--text-2); font-size:11.5px">${t("cam.counters_hint")}</p>
+      </div>
     </div>
 
     <div style="display:flex; flex-direction:column; gap:16px">
@@ -56,12 +64,36 @@ export async function renderCamera(container) {
   };
   setState(cam.state, false);
 
+  const phaseEl = container.querySelector("#camPhase");
+  const setPhase = (ph) => { if (ph) phaseEl.textContent = ph; };
+  setPhase(cam.phase);
+
   container.querySelector("#btnConnect").onclick = async () => {
     try { await api.connect(); toast("🔗 …", "ok"); }
     catch (err) { toast(err.message, "err"); }
   };
   container.querySelector("#btnDisconnect").onclick = async () => {
     await api.disconnect(); toast("⛔", "ok");
+  };
+  container.querySelector("#btnRestart").onclick = async () => {
+    toast("🔄 " + t("cam.restarting"), "ok");
+    try {
+      await api.restartCam();
+      toast("🔄 ✓ " + t("cam.restart_ok"), "ok");
+    } catch (err) { toast(err.message, "err"); }
+  };
+  container.querySelector("#btnPhoto").onclick = async () => {
+    const btn = container.querySelector("#btnPhoto");
+    btn.disabled = true;
+    toast("📸 " + t("cam.photo_sending"), "ok");
+    try {
+      const r = await api.takePhoto();
+      toast(`📸 ✓ ${r.filename} (${fmt.num(r.size)} B) — ${t("cam.photo_done")}`, "ok");
+    } catch (err) {
+      const p2 = err.payload;
+      if (p2) toast(`📸 ${p2.code}: ${p2.message}`, "err");
+      else toast(err.message, "err");
+    } finally { btn.disabled = false; }
   };
   container.querySelector("#btnTest").onclick = async () => {
     const box = container.querySelector("#testResult");
@@ -80,10 +112,32 @@ export async function renderCamera(container) {
     } catch (err) { body.textContent = err.message; }
   };
 
+  // pipeline counters table — shows exactly WHERE frames stop
+  const counterBox = container.querySelector("#counterTable");
+  let lastCounters = "";
+  function renderCounters(c) {
+    if (!c) return;
+    const rows = JSON.stringify(c);
+    if (rows === lastCounters) return;
+    lastCounters = rows;
+    const items = [
+      ["HTTP bytes", c.http_bytes], ["Chunks", c.chunks],
+      ["00VD", c.chunks_00vd], ["H264 bytes", c.h264_bytes],
+      ["AUs", c.aus], ["FFmpeg input", c.ffmpeg_input_bytes],
+      ["Decoded frames", c.decoded_frames], ["FrameBus", c.published_frames],
+      ["Viewer", c.viewer_frames],
+    ];
+    counterBox.innerHTML = items.map(([k, v]) =>
+      `<div class="kv"><span>${k}</span><b>${fmt.num(v || 0)}</b></div>`).join("");
+  }
+  renderCounters(cam.counters);
+
   // live updates
   const unsub = feed.on("state", (msg) => {
     const cam2 = msg.camera || {};
     setState(cam2.state, msg.mode === "demo");
+    setPhase(cam2.phase);
+    renderCounters(msg.counters);
     container.querySelector("#camReach").textContent =
       cam2.camera_reachable ? t("cam.yes") : t("cam.no");
     container.querySelector("#camLatency").textContent =

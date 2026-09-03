@@ -33,6 +33,7 @@ export async function renderDiagnostics(container) {
     <h3>🩺 ${t("diag.title")} <span class="grow"></span><span id="diagState" class="badge muted">—</span></h3>
     <p class="subtle">${t("diag.desc")}</p>
     <div class="btn-row">
+      <button class="btn" id="btnInspectLive" title="${t("diag.inspect_hint")}">🔍 ${t("diag.inspect_live")}</button>
       <button class="btn primary" id="btnRun">▶ ${t("diag.run")}</button>
       <button class="btn" id="btnExportJson">⬇ ${t("diag.export_json")}</button>
       <button class="btn" id="btnExportZip">🗜 ${t("diag.export_zip")}</button>
@@ -170,6 +171,20 @@ export async function renderDiagnostics(container) {
         <pre class="hexbox" style="max-height:150px; margin-top:8px">${esc(hexRows)}</pre>`;
     } catch (err) { /* silent */ }
   }
+
+  // Inspect Current Live Session: reads the EXISTING live pipeline state
+  // (parser head bytes, transport status) — never opens a new connection
+  $("btnInspectLive").onclick = async () => {
+    const btn = $("btnInspectLive");
+    btn.disabled = true;
+    try {
+      await loadInspector();
+      const pv = (await api.get("/api/stream/counters")) || {};
+      const c = pv.counters || {};
+      toast(`🔍 ${t("diag.inspect_live")} — ${t("cam.counters")}: HTTP ${fmt.num(c.http_bytes || 0)}B · 00VD ${fmt.num(c.chunks_00vd || 0)} · AUs ${fmt.num(c.aus || 0)} · frames ${fmt.num(c.decoded_frames || 0)}`, "ok");
+    } catch (err) { toast(err.message, "err"); }
+    finally { btn.disabled = false; }
+  };
 
   // ---- hex viewer ----
   async function loadHex() {

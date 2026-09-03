@@ -41,10 +41,13 @@ def classify(message: str, stage: str) -> dict:
     retryable = code in {
         "NETWORK_ERROR", "CAMERA_UNREACHABLE", "HTTP_STREAM_ERROR",
         "CAMERA_STREAM_STALLED", "FRAME_BUFFER_EMPTY", "SNAPSHOT_ERROR",
+        "NO_FRAME_AVAILABLE", "STREAM_NOT_READY",
     }
     fixes = {
         "NETWORK_ERROR": "Check the camera Wi-Fi/hotspot and this machine's network.",
         "CAMERA_UNREACHABLE": "Verify the camera is powered, on its Wi-Fi, and the IP/port are correct in Settings.",
+        "CAMERA_DISCONNECTED": "The camera did not answer (ping/TCP failed): power, Wi-Fi or IP settings.",
+        "NO_FRAME_AVAILABLE": "The camera is reachable but the live stream is not connected — press Connect (Camera tab), wait for the first frame, then snapshot.",
         "HTTP_STREAM_ERROR": "Confirm the stream path (/livestream_high.avi) and that no other client holds the live stream.",
         "CAMERA_STREAM_STALLED": "Camera sends headers but never a body: power-cycle the camera, close the phone Gear 360 app (it holds the single live-stream session), and re-arm live preview; then Connect again.",
         "STREAM_FORMAT_ERROR": "Capture a stream sample and inspect the container signatures.",
@@ -78,12 +81,25 @@ def snapshot_error_payload(hub, exc: Optional[Exception] = None) -> dict:
             "suggested_action": "Check projection settings; inspect hub logs (logs/errors.log).",
         })
     elif p is None or cam.state == "disconnected":
-        payload.update({
-            "code": "CAMERA_DISCONNECTED", "stage": "camera",
-            "message": "Camera is disconnected — no frames are being captured.",
-            "retryable": True,
-            "suggested_action": "Connect the camera (Camera tab) or enable Demo mode (Settings).",
-        })
+        # CAMERA_DISCONNECTED is reserved for "the camera itself is not
+        # answering". When the camera IS reachable but no live session
+        # exists (or no frame was decoded yet) the honest code is
+        # NO_FRAME_AVAILABLE — reachable != connected != frames.
+        if cam.camera_reachable:
+            payload.update({
+                "code": "NO_FRAME_AVAILABLE", "stage": "stream",
+                "message": ("Camera is reachable, but the live stream is not connected "
+                            "— no frames are available for a snapshot."),
+                "retryable": True,
+                "suggested_action": "Press Connect (Camera tab), wait for the first decoded frame, then retry the snapshot.",
+            })
+        else:
+            payload.update({
+                "code": "CAMERA_DISCONNECTED", "stage": "camera",
+                "message": "Camera is not answering (unreachable) — verify power and Wi-Fi.",
+                "retryable": True,
+                "suggested_action": "Check the camera is powered and this machine is on its Wi-Fi; verify the IP in Settings.",
+            })
     elif cam.state in ("connecting", "reconnecting"):
         payload.update({
             "code": "STREAM_NOT_READY", "stage": "network",

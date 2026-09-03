@@ -115,18 +115,6 @@ class FakeGear360Server:
         self._srv.server_close()
 
 
-@pytest.fixture()
-def fake_server():
-    made = []
-
-    def _make(behaviour: str, **kw):
-        srv = FakeGear360Server(behaviour, **kw)
-        made.append(srv)
-        return srv
-
-    yield _make
-    for srv in made:
-        srv.close()
 
 
 # ---------------------------------------------------------------- unit tests
@@ -248,13 +236,15 @@ def test_iter_camera_bytes_recovers_after_stall(fake_server):
     assert "stalled" in types, f"expected a stalled event, got {types}"
     assert "data" in types
     assert types.index("stalled") < types.index("data")
-    # style rotated between the stalled attempt and the data attempt
+    # recovery happens on a LATER attempt than the stall
     stalled_att = next(d["attempt"] for t, d in events if t == "stalled")
     data_att = next(d["attempt"] for t, d in events if t == "data")
     assert data_att > stalled_att
-    # the reader actually sent the different styles
+    # DG-20260903-001 hard evidence: the camera streams a body ONLY for
+    # Range requests — the live reader must send Range on EVERY attempt
+    # (the old rotation into plain/close was the root cause of dead sessions)
     styles = {r["range"] for r in srv.requests}
-    assert "bytes=0-" in styles and None in styles
+    assert styles == {"bytes=0-"}, f"live transport must be range-only, got {styles}"
 
 
 def test_iter_camera_bytes_reports_persistent_stall(fake_server):

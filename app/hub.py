@@ -6,6 +6,7 @@ import time
 from typing import Optional
 
 from .ai.engine import AIEngine
+from .build_info import banner_lines
 from .camera.manager import CameraManager
 from .core import database as db
 from .core import settings as settings_svc
@@ -95,6 +96,9 @@ class Hub:
         setup_logging()
         version = db.migrate()
         settings_svc.load()
+        # build identity banner — proves WHICH build produced the log lines
+        for line in banner_lines():
+            LOG.info("%s", line)
         LOG.info("Gear360 Hub starting (schema v%s)", version)
         self.ffmpeg = locate(settings_svc.get("ffmpeg.mode"), settings_svc.get("ffmpeg.custom_path", ""))
         self.recorder.ffmpeg = self.ffmpeg
@@ -208,14 +212,21 @@ class Hub:
         if latest is not None:
             h, w = latest.image.shape[:2]
         fps = self._pipeline_fps()
+        p = self.camera._pipeline
         return {
             "type": "state",
             "mode": self.mode,
-            "app": {"version": "1.1.0", "uptime": round(time.time() - self.started_at, 1)},
+            "app": {"version": "1.2.0", "uptime": round(time.time() - self.started_at, 1)},
             "camera": self.camera.info(),
             "stream": {"fps": fps, "width": w, "height": h,
                        "frames_published": self.bus.published,
                        "source": self.bus.source},
+            "counters": (p.counters() if p is not None else {
+                "http_bytes": 0, "chunks": 0, "chunks_00vd": 0, "chunk_counts": {},
+                "h264_bytes": 0, "aus": 0, "ffmpeg_input_bytes": 0,
+                "decoded_frames": 0, "published_frames": self.bus.published,
+                "viewer_frames": self.bus.viewer_frames,
+            }),
             "pipeline": self.pipeline_view(),
             "recording": self.recording_status(),
             "ai": self.ai.status() if self.ai else {"enabled": False},

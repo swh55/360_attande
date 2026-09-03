@@ -32,6 +32,7 @@ export async function renderLive(container, params) {
           </label>
           <button class="vbtn" id="btnReset">⌂ ${t("live.reset")}</button>
           <button class="vbtn" id="btnSnap">📷 ${t("live.snapshot")}</button>
+          <button class="vbtn" id="btnTakePhoto" title="${t("cam.photo_hint")}">📸 ${t("cam.take_photo")}</button>
           <button class="vbtn" id="btnRec">⏺ ${t("live.record")}</button>
           <button class="vbtn" id="btnFs">⛶</button>
           <label style="color:#fff; font-size:12px; display:flex; gap:6px; align-items:center">
@@ -124,6 +125,21 @@ export async function renderLive(container, params) {
     else wrap.requestFullscreen?.();
   };
   container.querySelector("#btnFs").onclick = toggleFs;
+
+  // REAL camera capture (independent pipeline: camera command → SD → FTP → gallery)
+  container.querySelector("#btnTakePhoto").onclick = async () => {
+    const btn = container.querySelector("#btnTakePhoto");
+    btn.disabled = true;
+    toast("📸 " + t("cam.photo_sending"), "ok");
+    try {
+      const r = await api.takePhoto();
+      toast(`📸 ✓ ${r.filename} (${fmt.num(r.size)} B) — ${t("cam.photo_done")}`, "ok");
+    } catch (err) {
+      const p2 = err.payload;
+      if (p2) toast(`📸 ${p2.code}: ${p2.message}`, "err");
+      else toast(err.message, "err");
+    } finally { btn.disabled = false; }
+  };
 
   container.querySelector("#btnSnap").onclick = async () => {
     try {

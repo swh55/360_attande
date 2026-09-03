@@ -61,6 +61,7 @@ class CameraManager:
             }
         return {
             "state": self.state,
+            "phase": self.phase(),
             "config": cfg,
             "stream_url": f"http://{cfg['host']}:{cfg['port']}{cfg['stream_path']}",
             "latency_ms": self.last_latency_ms,
@@ -80,6 +81,38 @@ class CameraManager:
         }
 
     # ---- commands -------------------------------------------------------------
+    def _session_active(self) -> bool:
+        """True while a live session exists (any state between connect and stop)."""
+        return self._pipeline is not None or self.state in (
+            "connecting", "streaming", "reconnecting", "error")
+
+    def phase(self) -> str:
+        """Granular pipeline phase — NEVER conflates 'connected' with 'streaming'.
+
+        DISCONNECTED → CONNECTING → STREAM_CONNECTED (headers, no body yet)
+        → PARSING (bytes, no valid metadata) → DECODING (metadata ok, decoder
+        starting) → FRAME_READY (first decoded frame) → STREAMING (frames
+        flowing). ERROR/RECONNECTING are reported through the camera state.
+        """
+        if self.state == "disconnected" or self._pipeline is None:
+            return "DISCONNECTED"
+        if self.state == "error":
+            return "ERROR"
+        if self.state == "reconnecting":
+            return "RECONNECTING"
+        p = self._pipeline
+        if not p.http_ok:
+            return "CONNECTING"
+        parser = p.parser
+        if p.first_byte_wall == 0 or parser is None or parser.chunks_seen == 0:
+            return "STREAM_CONNECTED"
+        if not parser.info.valid or not parser.info.width:
+            return "PARSING"
+        if p.decoded_frames == 0:
+            return "DECODING"
+        fresh = p.last_frame_wall and (time.time() - p.last_frame_wall) < 3.0
+        return "STREAMING" if fresh else "FRAME_READY"
+
     def connect(self) -> dict:
         with self._lock:
             if self.state in ("connecting", "streaming", "reconnecting"):
@@ -131,8 +164,33 @@ class CameraManager:
             event_bus.publish("camera_state", {"state": "disconnected"})
         return self.info()
 
+    def restart_stream(self) -> dict:
+        """Restart Live Stream: stop old session, close response, terminate
+        decoder, drop the stale latest frame, then start a FRESH session
+        (HTTP #2 → Parser #2 → Decoder #2) and wait for the first frame."""
+        LOG.info("RESTART: stopping current live stream (if any) …")
+        with self._lock:
+            if self._pipeline is not None:
+                self._pipeline.stop()
+                self._pipeline = None
+            self.state = "disconnected"
+            self._stop_state.set()
+        # stale frame must never masquerade as a live one after restart
+        self.bus.clear()
+        time.sleep(0.5)   # camera settle: single-session server releases the socket
+        LOG.info("RESTART: starting fresh live stream session")
+        out = self.connect()
+        event_bus.publish("camera_state", {"state": "restarting"})
+        return out
+
     def test_connection(self) -> dict:
-        """One-shot reachability + HTTP probe of the live-preview endpoint."""
+        """One-shot reachability + HTTP probe of the live-preview endpoint.
+
+        The camera's streaming server is SINGLE-SESSION: when the live
+        pipeline exists, this probe MUST NOT open a second connection — it
+        would steal the stream session from the live preview (newest request
+        wins on the camera). Instead it reports live-pipeline evidence.
+        """
         import requests
 
         host = settings_svc.get("camera.host")
@@ -140,6 +198,24 @@ class CameraManager:
         path = settings_svc.get("camera.stream_path")
         url = f"http://{host}:{port}{path}"
         out: dict = {"host": host, "port": port, "url": url, "tcp": False, "http": False}
+        p = self._pipeline
+        if self._session_active() and p is not None:
+            parser = p.parser
+            out.update({
+                "source": "live-pipeline (no probe connection opened)",
+                "tcp": self.camera_reachable,
+                "latency_ms": self.last_latency_ms,
+                "http": bool(p.http_ok),
+                "http_status": p.http_status,
+                "content_type": p.http_content_type,
+                "bytes_received": parser.bytes_seen if parser else 0,
+                "bytes_per_sec": p.bytes_per_sec,
+                "camera_state": self.state,
+                "phase": self.phase(),
+                "note": ("live session holds the camera's single stream session — "
+                         "this report reads live-pipeline state instead of probing"),
+            })
+            return out
         t0 = time.time()
         try:
             with socket.create_connection((host, port), timeout=3):
@@ -150,6 +226,8 @@ class CameraManager:
             return out
         try:
             t1 = time.time()
+            # Range header is REQUIRED: this camera streams a body only for
+            # Range requests (plain GET answers headers and stalls forever)
             with requests.get(url, stream=True, timeout=(3, 5), headers={"Range": "bytes=0-"}) as r:
                 out["http"] = True
                 out["http_status"] = r.status_code
@@ -185,17 +263,21 @@ class CameraManager:
             if p is None:
                 return
             fresh_chunks = p.last_chunk_wall and (time.time() - p.last_chunk_wall) < 3.0
+            fresh_frames = p.last_frame_wall and (time.time() - p.last_frame_wall) < 3.0
             if p.error:
                 if self.state != "error":
                     self.state = "error"
                     self.error = p.error
                     self.error_count += 1
                     event_bus.publish("camera_state", {"state": "error", "error": p.error})
-            elif fresh_chunks:
+            elif fresh_frames or fresh_chunks:
                 if self.state != "streaming":
                     self.state = "streaming"
                     event_bus.publish("camera_state", {"state": "streaming"})
-                    LOG.info("Streaming")
+                    if fresh_frames:
+                        LOG.info("Streaming (decoded frames flowing)")
+                    else:
+                        LOG.info("Streaming (container bytes flowing)")
             elif p.transport_status in ("stalled", "error"):
                 if self.state != "reconnecting":
                     self.state = "reconnecting"

@@ -290,6 +290,7 @@ class Gear360ChunkParser:
         self.first_00vd_logged = False
         self._last_pending_warn = 0.0
         self._pending_since: Optional[float] = None
+        self.tag_counts: dict = {}                  # per-FourCC chunk counter
 
     # -- public API ---------------------------------------------------------
     def feed(self, data: bytes) -> list[VideoFrame]:
@@ -347,6 +348,7 @@ class Gear360ChunkParser:
         self.first_00vd_logged = False
         self._last_pending_warn = 0.0
         self._pending_since = None
+        self.tag_counts = {}
 
     def diagnostics_snapshot(self) -> dict:
         """Bounded structured state for the diagnostics engine / API."""
@@ -377,6 +379,7 @@ class Gear360ChunkParser:
             "anomalies": list(self._anomalies),
             "au_ring_size": len(self.au_ring),
             "pending_chunk": dict(self.pending_chunk) if self.pending_chunk else None,
+            "tag_counts": dict(self.tag_counts),
         }
 
     # -- internals ----------------------------------------------------------
@@ -446,6 +449,7 @@ class Gear360ChunkParser:
                     continue
                 self.buffer.read(12)
                 self.ttts_size_fields.append(size)
+                self.tag_counts["TTTS"] = self.tag_counts.get("TTTS", 0) + 1
                 if size > 4:
                     self._anomaly("ttts_size_unexpected",
                                   f"size={size} — treated as fixed 12B per Extractor.kt")
@@ -485,6 +489,8 @@ class Gear360ChunkParser:
                     sub = payload[4:8] if len(payload) >= 8 else b""
                     if sub and sub != TAG_VR00:
                         self._anomaly("vr00_subtag", f"subTag={sub!r} (expected VR00)")
+                self.tag_counts[tag.decode("ascii", "replace")] = \
+                    self.tag_counts.get(tag.decode("ascii", "replace"), 0) + 1
                 self._log_chunk(tag, self._abs_offset(), size, 0, True)
                 continue
 
@@ -497,6 +503,7 @@ class Gear360ChunkParser:
                     self._anomaly("list_size_invalid", f"size={size}")
                     continue
                 self.buffer.read(8)   # tag + size; list type handled on next pass
+                self.tag_counts["LIST"] = self.tag_counts.get("LIST", 0) + 1
                 self._log_chunk(TAG_LIST, self._abs_offset(), size, 0, True)
                 continue
 
@@ -593,6 +600,8 @@ class Gear360ChunkParser:
         self.buffer.read(16)
         payload = self.buffer.read(size)
         self.chunks_seen += 1
+        tag_name = tag.decode("ascii", "replace")
+        self.tag_counts[tag_name] = self.tag_counts.get(tag_name, 0) + 1
         if not self.first_00vd_logged and tag == TAG_00VD:
             self.first_00vd_logged = True
             LOG.info(
@@ -664,14 +673,25 @@ class BackoffPolicy:
         self.failed_attempts = 0
 
 
-# Request styles rotated across connection attempts. Real Gear 360 units
-# answered "Range: bytes=0-" with 206 + body historically; if a session
-# wedges, rotating the style empirically tests whether style is the trigger.
-REQUEST_STYLES = (
-    ("range", {"Range": "bytes=0-"}),
-    ("plain", {}),
-    ("close", {"Range": "bytes=0-", "Connection": "close"}),
-)
+# Request style for the LIVE session. Hard evidence (DG-20260903-001,
+# http_variants): the SM-R210 streams a body ONLY when the request carries
+# "Range: bytes=0-" (206 + 65536 bytes); the plain and Connection:close
+# styles answer headers and then stall (HEADERS_WITHOUT_BODY / ReadTimeout).
+# Rotating into those styles during live operation wastes ~2 attempts of
+# ~8s each every cycle and makes the UI flip to stalled/disconnected.
+# => The live transport therefore uses the proven "range" style EVERY time.
+# The diagnostic probe matrix (probes.py) still tests the other styles on
+# purpose — but only while no live session holds the camera.
+LIVE_REQUEST_STYLE = ("range", {"Range": "bytes=0-"})
+
+# Kept for backwards compatibility with anything importing REQUEST_STYLES.
+REQUEST_STYLES = (LIVE_REQUEST_STYLE,)
+
+# After a failed/stalled attempt the camera's single-session streaming server
+# needs a moment to release the previous socket before it will serve a new
+# one (observed: immediate retries answer headers-without-body). This settle
+# window is added on top of the exponential backoff for zero-byte attempts.
+CAMERA_SETTLE_SECONDS = 2.0
 
 
 def iter_camera_bytes(cfg: dict, stop_event: threading.Event,
@@ -679,10 +699,12 @@ def iter_camera_bytes(cfg: dict, stop_event: threading.Event,
     """Yield raw bytes from the camera live-preview HTTP endpoint.
 
     Transport behaviour:
-      * rotates request styles across attempts (range / plain / close);
+      * always requests with the proven "Range: bytes=0-" style (the camera
+        streams a body only for Range requests — see LIVE_REQUEST_STYLE);
       * treats "headers received but zero body bytes before the read window
-        closed" as a STALLED attempt: closes the socket and retries (a fresh
-        request often kick-starts a wedged camera streaming session);
+        closed" as a STALLED attempt: closes the socket, waits a camera-settle
+        window (the single-session server must release the old socket) and
+        retries — a fresh request often kick-starts a wedged session;
       * applies exponential reconnect backoff, reset once bytes flow;
       * emits transport events via `on_event(type, **detail)` so the pipeline
         and diagnostics can show CONNECTION/HEADERS/STALLED/DATA/RETRY states.
@@ -711,7 +733,7 @@ def iter_camera_bytes(cfg: dict, stop_event: threading.Event,
     stalled_attempts = 0
     while not stop_event.is_set():
         attempt += 1
-        style_name, style_headers = REQUEST_STYLES[(attempt - 1) % len(REQUEST_STYLES)]
+        style_name, style_headers = LIVE_REQUEST_STYLE
         headers = {"User-Agent": session.headers["User-Agent"], "Accept": "*/*", **style_headers}
         bytes_in_attempt = 0
         t0 = time.time()
@@ -764,5 +786,14 @@ def iter_camera_bytes(cfg: dict, stop_event: threading.Event,
                     "session — close it; (3) live preview not armed on the camera.",
                     stalled_attempts)
                 emit("stall_persist", attempts=stalled_attempts)
+            if kind == "stalled":
+                # zero-byte attempt: the camera may still be holding/releasing
+                # the previous single-session socket — give it a settle window
+                # before knocking again (immediate retries answer headers only)
+                settle = CAMERA_SETTLE_SECONDS
+                LOG.info("STREAM: camera settle window %.1fs before retry "
+                         "(single-session server must release the old socket)", settle)
+                if stop_event.wait(settle):
+                    return
             if stop_event.wait(delay):
                 return

@@ -30,6 +30,12 @@ DEFAULTS: dict[str, dict[str, Any]] = {
     "camera.auto_reconnect": {"v": True, "t": "bool", "cat": "camera"},
     "camera.reconnect_delay": {"v": 1.0, "t": "float", "min": 0.2, "max": 30, "step": 0.1, "cat": "camera"},
     "camera.health_interval": {"v": 5.0, "t": "float", "min": 1, "max": 120, "step": 1, "cat": "camera"},
+    # Camera control (gear360_modding services — Take Photo via the camera)
+    "camera.control.enabled": {"v": True, "t": "bool", "cat": "camera"},
+    "camera.control.telnet_port": {"v": 23, "t": "int", "min": 1, "max": 65535, "cat": "camera"},
+    "camera.control.ftp_port": {"v": 21, "t": "int", "min": 1, "max": 65535, "cat": "camera"},
+    "camera.control.command": {"v": "st key click s2", "t": "str", "cat": "camera"},
+    "camera.control.settle_ms": {"v": 2500, "t": "int", "min": 500, "max": 15000, "step": 250, "cat": "camera"},
     # Streaming
     "stream.request_timeout": {"v": 8.0, "t": "float", "min": 1, "max": 60, "step": 1, "cat": "streaming"},
     "stream.buffer_mb": {"v": 64, "t": "int", "min": 8, "max": 512, "step": 8, "cat": "streaming"},

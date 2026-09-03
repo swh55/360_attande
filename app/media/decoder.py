@@ -41,6 +41,8 @@ class FFmpegDecoder:
         self.started_at = 0.0
         self.last_write_wall = 0.0
         self.last_error = ""
+        self.exit_code: Optional[int] = None
+        self.command: list[str] = []
         self.stderr_tail: deque = deque(maxlen=40)
 
     def start(self) -> None:
@@ -54,10 +56,13 @@ class FFmpegDecoder:
             "-f", fmt, "-i", "pipe:0",
             "-an", "-sn", "-f", "rawvideo", "-pix_fmt", "bgr24", "pipe:1",
         ]
-        LOG.info("Starting decoder: %s", " ".join(cmd))
+        self.command = list(cmd)
+        LOG.info("FFMPEG: path=%s", self.ffmpeg_path)
+        LOG.info("FFMPEG: command=%s", " ".join(cmd))
         self.proc = subprocess.Popen(
             cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE
         )
+        LOG.info("FFMPEG: started pid=%s (stdin/stdout/stderr pipes open)", self.proc.pid)
         self.started_at = time.time()
         self._stopped.clear()
         self._reader = threading.Thread(target=self._read_loop, name="ffmpeg-reader", daemon=True)
@@ -87,8 +92,14 @@ class FFmpegDecoder:
                 chunk = stream.read(need)
                 if not chunk:
                     if not self._stopped.is_set():
-                        LOG.warning("ffmpeg stdout closed")
-                        self.last_error = self.last_error or "ffmpeg stdout closed unexpectedly"
+                        rc = self.proc.poll() if self.proc else None
+                        self.exit_code = rc
+                        LOG.error(
+                            "FFMPEG: stdout closed — return_code=%s frames_out=%d "
+                            "bytes_in=%d stderr_tail=%s",
+                            rc, self.frames_out, self.bytes_in, list(self.stderr_tail)[-5:])
+                        self.last_error = self.last_error or \
+                            f"ffmpeg stdout closed unexpectedly (exit={rc})"
                         self._stopped.set()
                     return
                 buf.extend(chunk)
@@ -137,8 +148,12 @@ class FFmpegDecoder:
             self.proc.stdin.flush()
             self.bytes_in += len(payload)
             self.last_write_wall = time.time()
+            if self.bytes_in - len(payload) == 0:
+                LOG.info("FFMPEG: first encoded AU written to stdin (%d bytes) — input bytes flowing", len(payload))
         except (BrokenPipeError, OSError) as exc:
             self.last_error = f"stdin write failed: {exc}"
+            LOG.error("FFMPEG: stdin write failed (%d bytes in so far, exit=%s): %s",
+                      self.bytes_in, (self.proc.poll() if self.proc else None), exc)
             raise
         while True:
             try:
@@ -159,6 +174,12 @@ class FFmpegDecoder:
                 self.proc.kill()
             except Exception:
                 pass
+            try:
+                self.exit_code = self.proc.wait(timeout=2)
+            except Exception:
+                self.exit_code = self.exit_code if self.exit_code is not None else -1
+            LOG.info("FFMPEG: terminated exit_code=%s frames_out=%d bytes_in=%d",
+                     self.exit_code, self.frames_out, self.bytes_in)
             self.proc = None
 
 
@@ -170,8 +191,11 @@ class StreamPipeline:
         self.ffmpeg_path = ffmpeg_path
         self.parser = None  # set when pipeline runs
         self.decoder: Optional[FFmpegDecoder] = None
-        self.encoded_frames = 0
+        self.encoded_frames = 0          # AUs delivered by the parser
         self.decoded_frames = 0
+        self.video_bytes_received = 0    # sum of 00VD payload bytes (encoded)
+        self.first_au_ts: Optional[float] = None
+        self.last_au_ts: Optional[float] = None
         self.error: Optional[str] = None
         self.last_frame_wall = 0.0
         self.first_frame_wall = 0.0
@@ -236,6 +260,32 @@ class StreamPipeline:
         return round(db / dt, 0) if dt > 0 else 0.0
 
     # ---- diagnostics / health ----------------------------------------------
+    def counters(self) -> dict:
+        """Full pipeline counter table (HTTP bytes -> ... -> viewer frames).
+
+        Reading it answers WHERE frames stop:
+          00VD == 0                      -> parser/stream problem
+          00VD > 0, ffmpeg input == 0    -> decoder problem
+          decoded > 0, viewer == 0       -> frontend/projection problem
+        """
+        parser = self.parser
+        tc = getattr(parser, "tag_counts", {}) or {}
+        dec = self.decoder
+        return {
+            "http_bytes": parser.bytes_seen if parser else 0,
+            "chunks": parser.chunks_seen if parser else 0,
+            "chunks_00vd": tc.get("00VD", 0),
+            "chunk_counts": dict(tc),
+            "h264_bytes": self.video_bytes_received,
+            "aus": self.encoded_frames,
+            "first_au_ts": self.first_au_ts,
+            "last_au_ts": self.last_au_ts,
+            "ffmpeg_input_bytes": dec.bytes_in if dec else 0,
+            "decoded_frames": self.decoded_frames,
+            "published_frames": self.bus.published,
+            "viewer_frames": self.bus.viewer_frames,
+        }
+
     def signals(self) -> dict:
         """Layered health signals for the health state machine."""
         parser = self.parser
@@ -385,6 +435,16 @@ class StreamPipeline:
                     continue
                 for frame in frames:
                     self.encoded_frames += 1
+                    self.video_bytes_received += len(frame.payload)
+                    now = time.time()
+                    if self.first_au_ts is None:
+                        self.first_au_ts = now
+                        LOG.info("AU: first H264 access unit #%d (%d bytes encoded)",
+                                 self.encoded_frames, len(frame.payload))
+                    self.last_au_ts = now
+                    if self.encoded_frames <= 10:
+                        LOG.info("AU: H264 AU #%d, %d bytes, keyframe=%s",
+                                 self.encoded_frames, len(frame.payload), frame.keyframe)
                     try:
                         images = self.decoder.write(frame.payload)
                     except (BrokenPipeError, OSError) as exc:

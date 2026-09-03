@@ -65,7 +65,14 @@ class FrameBus:
         self._taps: dict[str, Tap] = {}
         self._lock = threading.Lock()
         self.published = 0
+        self.viewer_frames = 0       # frames actually consumed by viewers/UI
+        self.last_viewer_wall = 0.0
         self.source = "idle"
+
+    def note_viewer_frame(self) -> None:
+        """Called by viewer endpoints (mjpeg / frame.jpg) when a frame is sent."""
+        self.viewer_frames += 1
+        self.last_viewer_wall = time.time()
 
     def publish(self, frame: Frame) -> None:
         with self._lock:
@@ -97,3 +104,9 @@ class FrameBus:
     def tap_names(self) -> list[str]:
         with self._lock:
             return list(self._taps.keys())
+
+    def clear(self) -> None:
+        """Drop the latest frame (used by Restart Stream — the viewer must
+        show 'waiting' instead of a stale frame; counters stay monotonic)."""
+        with self._lock:
+            self._latest = None

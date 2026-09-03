@@ -7,6 +7,7 @@ import cv2
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from ..camera.control import ControlError, control_cfg, status as control_status, take_photo
 from ..camera.profiles import load_profiles
 from ..core import settings as settings_svc
 from ..diagnostics.errors import snapshot_error_payload
@@ -44,12 +45,66 @@ def camera_test():
     return get_hub().camera.test_connection()
 
 
+@router.post("/camera/restart")
+def camera_restart():
+    """Restart Live Stream: fresh HTTP session → fresh parser → fresh decoder.
+    Waits for the first frame; never reuses the old session's parser state."""
+    hub = get_hub()
+    info = hub.camera.restart_stream()
+    hub.apply_mode()
+    return info
+
+
+@router.post("/camera/photo")
+def camera_take_photo():
+    """REAL Take Photo: camera command (st key click s2 via the mod's telnet)
+    → file on the SD → FTP sync → Gallery. Independent from the live stream
+    and from FrameBus snapshots. Structured 409 body on any stage failure."""
+    try:
+        return take_photo()
+    except ControlError as exc:
+        return JSONResponse(status_code=409, content={
+            "error": "TAKE_PHOTO_FAILED", "code": exc.code,
+            "message": str(exc), "retryable": True,
+            "evidence": exc.evidence,
+            "suggested_action": "Check the gear360_modding services (Telnet 23 / FTP 21) are reachable: Settings → Camera control.",
+        })
+    except Exception as exc:
+        return JSONResponse(status_code=500, content={
+            "error": "TAKE_PHOTO_FAILED", "code": "SNAPSHOT_FAILED",
+            "message": str(exc), "retryable": True, "evidence": {},
+        })
+
+
+@router.get("/camera/control/status")
+def camera_control_status():
+    """Availability of the mod's control transports (telnet/ftp)."""
+    return control_status()
+
+
 @router.get("/camera/profiles")
 def camera_profiles():
     return {"profiles": [p.__dict__ for p in load_profiles()]}
 
 
 # ----------------------------------------------------------------- stream
+@router.get("/stream/counters")
+def stream_counters():
+    """Full pipeline counter table (task: HTTP bytes → chunks → 00VD → H264
+    AUs → FFmpeg input → decoded → published → viewer). Reading the table
+    localises where frames stop."""
+    hub = get_hub()
+    p = hub.camera._pipeline
+    table = p.counters() if p is not None else {
+        "http_bytes": 0, "chunks": 0, "chunks_00vd": 0, "chunk_counts": {},
+        "h264_bytes": 0, "aus": 0, "first_au_ts": None, "last_au_ts": None,
+        "ffmpeg_input_bytes": 0, "decoded_frames": 0,
+        "published_frames": hub.bus.published, "viewer_frames": hub.bus.viewer_frames,
+    }
+    return {"mode": hub.mode, "camera_state": hub.camera.state,
+            "phase": hub.camera.phase(), "counters": table}
+
+
 @router.get("/stream/status")
 def stream_status():
     hub = get_hub()
@@ -127,6 +182,7 @@ def mjpeg(width: int | None = None):
                 img = cv2.resize(img, (width, int(img.shape[0] * scale)))
             ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, quality])
             if ok:
+                hub.bus.note_viewer_frame()
                 yield (b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: "
                        + str(len(buf)).encode() + b"\r\n\r\n" + buf.tobytes() + b"\r\n")
 
@@ -142,6 +198,7 @@ def single_frame():
     ok, buf = cv2.imencode(".jpg", frame.image, [cv2.IMWRITE_JPEG_QUALITY, 85])
     if not ok:
         raise HTTPException(500, "encode failed")
+    hub.bus.note_viewer_frame()
     from fastapi.responses import Response
     return Response(content=buf.tobytes(), media_type="image/jpeg")
 
