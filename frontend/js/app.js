@@ -10,6 +10,7 @@ import { renderAI } from "./views/ai.js";
 import { renderPeople } from "./views/people.js";
 import { renderCamera } from "./views/camera.js";
 import { renderSettings } from "./views/settings.js";
+import { renderDiagnostics } from "./views/diagnostics.js";
 
 export const state = {
   last: null,           // last WS state snapshot
@@ -68,6 +69,7 @@ const NAV = [
   ["ai", "ai", "✦"],
   ["people", "people", "☺"],
   ["camera", "camera", "⚙"],
+  ["diagnostics", "diagnostics", "🩺"],
   ["settings", "settings", "🔧"],
 ];
 
@@ -98,6 +100,7 @@ const views = {
   ai: renderAI,
   people: renderPeople,
   camera: renderCamera,
+  diagnostics: renderDiagnostics,
   settings: renderSettings,
 };
 

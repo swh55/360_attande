@@ -33,6 +33,7 @@ export async function renderLive(container, params) {
           </label>
         </div>
       </div>
+      <div class="layer-chips" id="liveLayers" style="margin-top:10px"></div>
       <div class="card" style="margin-top:14px">
         <h3>🎯 ${t("live.calibration")}</h3>
         <div class="grid cols-3" style="gap:12px" id="calBox"></div>
@@ -63,6 +64,7 @@ export async function renderLive(container, params) {
   const tag = container.querySelector("#liveTag");
   let gl, img, video, raf = 0;
   const cleanups = [];
+  function esc(s) { const d = document.createElement("div"); d.textContent = String(s ?? ""); return d.innerHTML; }
   let following = false;
 
   // ---- source: recording playback or live MJPEG ----
@@ -122,7 +124,24 @@ export async function renderLive(container, params) {
       const q = `projection=${projSel.value}&yaw=${(gl.yaw * 180 / Math.PI).toFixed(1)}&fov=${(gl.fov * 180 / Math.PI).toFixed(0)}`;
       const out = await api.get("/api/stream/snapshot?" + q);
       toast(`✓ ${out.filename}`, "ok");
-    } catch (err) { toast(err.message, "err"); }
+    } catch (err) {
+      const p2 = err.payload;
+      if (p2) {
+        const body = el(`<div>
+          <div class="rca conf-HIGH">
+            <h4>${esc(p2.code || "ERROR")}</h4>
+            <p>${esc(p2.message || "")}</p>
+            <ul>${Object.entries(p2.evidence || {}).map(([k, v]) => `<li class="mono"><b>${esc(k)}</b>: ${esc(v)}</li>`).join("")}</ul>
+            <div class="act">→ ${esc(p2.suggested_action || "")}</div>
+          </div>
+          <div class="btn-row"><button class="btn primary" id="goDiag">🩺 ${t("nav.diagnostics")}</button></div>
+        </div>`);
+        body.querySelector("#goDiag").onclick = () => { location.hash = "#/diagnostics"; m.close(); };
+        const m = modal(t("live.snapshot"), body, true);
+      } else {
+        toast(err.message, "err");
+      }
+    }
   };
 
   const btnRec = container.querySelector("#btnRec");
@@ -205,6 +224,22 @@ export async function renderLive(container, params) {
       srcInfo.textContent = "Demo source — 1280×720 · 15 FPS";
     } else {
       srcInfo.textContent = t("live.none");
+    }
+    const lb = container.querySelector("#liveLayers");
+    if (lb) {
+      const pv = msg.pipeline || {};
+      const layers = pv.layers || {};
+      const keys = ["camera", "http", "stream", "parser", "metadata", "decoder", "frame"];
+      lb.innerHTML = "";
+      for (const key of keys) {
+        const l = layers[key] || { state: "unknown", detail: "" };
+        const chip = el(`<span class="layer-chip ${esc(l.state)}" title="${esc(l.detail || "")}"><span class="ld"></span>${t("diag.layer." + key, key)}</span>`);
+        chip.onclick = () => { location.hash = "#/diagnostics"; };
+        lb.appendChild(chip);
+      }
+      const fpsChip = el(`<span class="layer-chip ${pv.fps > 0 ? "ok" : "unknown"}"><span class="ld"></span>FPS ${pv.fps ?? 0}</span>`);
+      fpsChip.onclick = () => { location.hash = "#/diagnostics"; };
+      lb.appendChild(fpsChip);
     }
   }));
 

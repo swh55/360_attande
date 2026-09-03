@@ -20,10 +20,17 @@ async function request(method, url, body, isForm) {
   let data;
   try { data = JSON.parse(text); } catch { data = text; }
   if (!res.ok) {
-    const msg = typeof data === "object" && data?.detail
-      ? (typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail))
-      : `${res.status}`;
-    throw new Error(msg);
+    let msg = `${res.status}`;
+    let structured = null;
+    if (data && typeof data === "object") {
+      if (data.error && data.message) { msg = data.message; structured = data; }
+      else if (data.detail) {
+        msg = typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail);
+      }
+    }
+    const err = new Error(msg);
+    if (structured) err.payload = structured;
+    throw err;
   }
   return data;
 }

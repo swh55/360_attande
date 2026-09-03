@@ -292,3 +292,48 @@ html[dir=rtl] .setting-row .ctl select option { direction: rtl; }
   .topbar { padding: 0 12px; gap: 8px; }
   .topbar-stats { display: none; }
 }
+
+/* ---- diagnostics ---- */
+.diag-pipe { display: grid; grid-template-columns: repeat(auto-fit, minmax(118px, 1fr)); gap: 10px; }
+.diag-stage { border: 1px solid var(--border); border-radius: 10px; padding: 10px; cursor: pointer; background: var(--surface); transition: box-shadow .15s, transform .15s; }
+.diag-stage:hover { box-shadow: var(--shadow); transform: translateY(-2px); }
+.diag-stage .s-ico { font-size: 16px; font-weight: 800; }
+.diag-stage .s-name { display: block; font-size: 11.5px; font-weight: 700; margin-top: 4px; }
+.diag-stage .s-state { font-size: 10px; font-weight: 800; letter-spacing: .7px; margin-top: 3px; display: inline-block; }
+.diag-stage.PASS .s-ico, .diag-stage.PASS .s-state { color: var(--green); }
+.diag-stage.WARNING .s-ico, .diag-stage.WARNING .s-state { color: var(--amber); }
+.diag-stage.FAIL .s-ico, .diag-stage.FAIL .s-state { color: var(--red); }
+.diag-stage.NOT_TESTED .s-ico, .diag-stage.NOT_TESTED .s-state { color: #94a3b8; }
+.layer-chips { display: flex; gap: 8px; flex-wrap: wrap; }
+.layer-chip { display: inline-flex; align-items: center; gap: 7px; border: 1px solid var(--border); background: var(--surface); padding: 6px 12px; border-radius: 999px; font-size: 12px; font-weight: 700; cursor: pointer; }
+.layer-chip .ld { width: 9px; height: 9px; border-radius: 50%; background: #94a3b8; }
+.layer-chip.ok .ld { background: var(--green); }
+.layer-chip.fail .ld { background: var(--red); }
+.layer-chip.warn .ld { background: var(--amber); }
+.layer-chip.unknown .ld { background: #94a3b8; }
+.mono { font-family: ui-monospace, SFMono-Regular, Consolas, "Courier New", monospace; }
+.ltr { direction: ltr; unicode-bidi: isolate; }
+.hexbox { direction: ltr; text-align: left; background: #0e151b; color: #cfe3d8; border-radius: 10px; padding: 12px 14px; overflow: auto; max-height: 360px; font-family: ui-monospace, Consolas, monospace; font-size: 12px; line-height: 1.6; white-space: pre; }
+.rca { border-inline-start: 4px solid #94a3b8; background: var(--surface-2); border-radius: 10px; padding: 12px 14px; margin-bottom: 10px; }
+.rca.conf-HIGH { border-color: var(--red); }
+.rca.conf-MEDIUM { border-color: var(--amber); }
+.rca h4 { margin: 0 0 6px; font-size: 13.5px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.rca ul { margin: 6px 0; padding-inline-start: 20px; color: var(--text-2); font-size: 12.5px; }
+.rca .act { font-size: 12.5px; font-weight: 600; }
+.plausible-yes { color: var(--green); font-weight: 800; }
+.plausible-no { color: var(--red); font-weight: 800; }
+.verdict-badge { display: inline-block; padding: 2px 8px; border-radius: 6px; font-size: 10.5px; font-weight: 800; letter-spacing: .5px; }
+.verdict-badge.OK { background: #dcfce7; color: var(--green); }
+.verdict-badge.IMPLAUSIBLE, .verdict-badge.FOURCC { background: #fee2e2; color: var(--red); }
+.verdict-badge.INFO, .verdict-badge.HIGH, .verdict-badge.MEDIUM { background: var(--surface-2); color: var(--text-2); }
+.legacy-row td { opacity: .75; background: rgba(217,119,6,.04); }
+.diag-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; }
+.metric { border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; background: var(--surface); }
+.metric .v { font-size: 17px; font-weight: 800; font-variant-numeric: tabular-nums; }
+.metric .k { font-size: 11px; color: var(--text-2); font-weight: 700; margin-top: 2px; }
+.progress { height: 8px; background: var(--surface-2); border-radius: 999px; overflow: hidden; margin-top: 10px; }
+.progress > div { height: 100%; background: var(--accent); width: 0%; transition: width .4s; }
+.frame-thumb { max-width: 100%; border-radius: 10px; border: 1px solid var(--border); background: #101820; min-height: 120px; display: block; }
+.scroll-y { max-height: 420px; overflow-y: auto; }
+.table-wrap { overflow-x: auto; }
+.subtle { color: var(--text-2); font-size: 12px; }
