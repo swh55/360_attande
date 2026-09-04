@@ -27,6 +27,8 @@ Nothing in this document may be promoted a level without new evidence.
 | E13 | **The SM-R210 streamer is SINGLE-SHOT per arming**: client #1 got 9.2 MB continuous (~1.15 MB/s, 8 s, no idle events); client #2 seconds later, IDENTICAL request bytes (`Range: bytes=0-` + keep-alive — verified in both probe sources), got 206 headers and ZERO body (recv_timeout 3 s); client #3 timed out with 0 bytes | **LEVEL 0** (field evidence `20260904_115725_tcp_stream_probe.json` vs `115729_raw_camera_probe.json` vs `115733_raw_camera_stream_dump.json` — sequential PHASE 1→2→2d) |
 | E14 | The PHASE 2b variant matrix of 2026-09-04 ran ZERO variants (`order=[] results=[]`) — orchestrator passed letters `B,A,C,D,E` but the tool filtered on full keys → **"HTTP style dependency? true" in that run's failure tree was an ARTIFACT, not evidence** | **LEVEL 0** (tool bug, fixed inv-2.0: letter aliases accepted) |
 | E15 | Telnet on this unit demands auth (`Password:` / `Login incorrect` — zero commands executed, PHASE 3 verdict LISTENER_UNCONFIRMED meaningless) while **8888 `/cgi-bin/execute?rawcmd=` executes commands and returns output** (`echo g360probe-ok` → output echoed) | **LEVEL 0** (`20260904_115759_camera_shell_inspect.json` vs `20260904_115759_camera_control_probe.json`) |
+| E16 | **NO SELF-HEAL, NO STEAL, NO LATE RE-ARM — and a TWO-STAGE wedge cascade.** Decisive lifecycle probe (apply=true): after client #1 got BODY_OK (5.5 MB / 5 s), self-heal window +1 s/+6 s/+21 s/+51 s gave headers-only, connect-timeout, `200 + closed_by_camera`, connect-timeout — never a second body; concurrent join stalled BOTH clients; every re-arm action (root ping, `ps`, internal wget, streamer kill) failed with **host unreachable (WinError 10065) on ALL ports incl. 8888** → verdict `NO_REARM_FOUND` | **LEVEL 0** (`20260904_123314_session_lifecycle_probe.json`, archived in `diagnostics/raw/evidence/`) |
+| E17 | **The wedge cascade is TWO-STAGE, not immediate:** at 11:57:59 — i.e. AFTER the streamer wedged (11:57:33) — the control plane was STILL fully alive (telnet 23 ok 15 ms, FTP 21 ok 3 ms, HTTP 8888 ok 20 ms, exec-CGI 200). The stage-2 total host unreachability of E16 only appears after the camera is **repeatedly hammered** with new connection attempts (lifecycle probe fired ≥4 timed-out attempts + 2 concurrent + 5 re-arm probes over ~1 min) | **LEVEL 0** (`20260904_115759_camera_control_probe.json` timestamps vs `20260904_123314_session_lifecycle_probe.json` st3) |
 
 ---
 
@@ -87,6 +89,16 @@ Nothing in this document may be promoted a level without new evidence.
 - The health probe opened a bare TCP connection to 7679 every 5 s **including while live**; test/diagnostic probes used to compete too (probe matrix suppressed since `171e8bb`).
 - **Fixed:** `_probe_loop` now derives reachability from live transport bytes while a session exists; a session broker (`app/camera/session_broker.py`) now guards every connection path in-process AND cross-process (`diagnostics/raw/session.lock` heartbeat read by all `tools/*.py`).
 
+### RC-7 — TWO-STAGE WEDGE CASCADE: re-arm only exists in stage 1; hammering the camera drives it to stage 2 where NOTHING works (refines RC-6, LEVEL 0)
+- **Evidence E16 + E17 (LEVEL 0):**
+  - **Stage 1 — streamer wedged, host alive:** streamer answers headers-without-body, but telnet/FTP/8888 exec-CGI still respond (11:57:59, 26 s after the wedge). In this window the re-arm ladder (`app/camera/rearm.py`) has a real network path and S1–S3 are harmless; S4 (kill 7679 listener → init respawn) is the only candidate that can re-arm without power.
+  - **Stage 2 — host wedged:** after enough connection attempts (each timed-out client occupies streamer resources for its timeout window), the camera drops off Wi-Fi ENTIRELY — `WinError 10065` on 23/21/8888/7679 alike (lifecycle probe st3). `NO_REARM_FOUND`: there is **no remote recovery from stage 2**. Only a physical power cycle.
+- **Why the user sees "stop & freeze":** the Hub's earlier blind reconnect loop (fixed since RC-6) plus any manual retries actively push the camera from stage 1 into stage 2. The freeze is therefore partly SELF-INFLICTED by retry pressure — which is why the retry loop had to die (WEDGED_STALL_LIMIT) and why the new Capability Center ranks every feature by how hard it hits the camera.
+- **Operational law (drives the Capability Center tiers):**
+  1. ONE session per arming; hold it as long as needed; never disconnect speculatively.
+  2. NEVER probe/knock 7679 while a session is held (broker-guarded since RC-5).
+  3. On stream loss: classify FIRST (control-plane + CGI inspector — stage-1 check), run the re-arm ladder ONCE in stage 1, and if it fails or stage 2 is detected, STOP and show the power-cycle wizard. Zero blind retries.
+
 ---
 
 ## 3. Failure Tree (task §43) — current state
@@ -101,6 +113,8 @@ NO LIVE VIDEO
 ├── HTTP body unavailable? ............. YES after first client (E13, LEVEL 0)
 │     └── first client: 9.2 MB continuous (continuity PROVEN — E4 resolved)
 │         clients #2+: 206 headers + ZERO body → single-shot streamer (RC-6)
+│             └── self-heal/steal/late-re-arm: ALL NONE (E16, RC-7)
+│                 └── hammering → stage-2 host wedge: even 8888 gone (E16/E17)
 │
 ├── HTTP style dependency? ............. NO (RC-1 resolved as artifact E14)
 │     └── matrix tool bug fixed (letters); style is NOT the variable (E13)

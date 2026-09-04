@@ -347,3 +347,22 @@ html[dir=rtl] .setting-row .ctl select option { direction: rtl; }
 .scroll-y { max-height: 420px; overflow-y: auto; }
 .table-wrap { overflow-x: auto; }
 .subtle { color: var(--text-2); font-size: 12px; }
+
+/* ---------- Capability Center (tiered by guarantee, RC-6/RC-7) ---------- */
+.cap-hero .cap-sub { color: var(--text-2); font-size: 12.5px; line-height: 1.7; margin: 6px 0 12px; }
+.cap-hero-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; }
+.cap-probe { margin-top: 12px; border: 1px dashed var(--border); border-radius: 10px; padding: 10px 12px; background: var(--surface-2); }
+.cap-tier h3 { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.cap-list { display: flex; flex-direction: column; gap: 12px; max-height: 72vh; overflow-y: auto; padding-inline-end: 4px; }
+.cap-feature { border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; background: var(--surface-2); }
+.cap-head { display: flex; gap: 12px; align-items: flex-start; flex-wrap: wrap; }
+.cap-ico { font-size: 20px; line-height: 1.4; }
+.cap-title { flex: 1 1 240px; min-width: 220px; }
+.cap-title b { font-size: 13.5px; }
+.cap-desc { color: var(--text-2); font-size: 12px; line-height: 1.7; margin-top: 4px; }
+.cap-side { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; margin-inline-start: auto; }
+.cap-detail { color: var(--text-2); font-size: 11px; font-variant-numeric: tabular-nums; }
+.cap-ev { margin-top: 8px; font-size: 10.5px; color: var(--text-2); }
+.cap-ev code { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 1px 6px; font-size: 10px; }
+.cap-feature .btn[disabled] { opacity: .5; cursor: not-allowed; }
+@media (max-width: 640px) { .cap-side { align-items: flex-start; } }

@@ -14,6 +14,7 @@ from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from .api.camera_api import router as camera_router
+from .api.capabilities_api import router as capabilities_router
 from .api.diagnostics_api import router as diagnostics_router
 from .api.hub_api import router as hub_router
 from .core import database as db
@@ -48,6 +49,7 @@ def create_app() -> FastAPI:
     )
 
     app.include_router(camera_router)
+    app.include_router(capabilities_router)
     app.include_router(hub_router)
     app.include_router(diagnostics_router)
 

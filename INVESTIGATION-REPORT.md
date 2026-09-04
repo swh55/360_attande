@@ -37,34 +37,54 @@
 
 ## 3. First Failing Layer
 
-With the Hub-side fixes applied, the **first still-open failing layer is L4 →
-L3 boundary**: whether the camera's body stream is **continuous** beyond the
-first buffer (L4) and under **which request styles** (L3). Both are now
-measurable in one run (`tools/run_investigation.py`). Everything below that
-boundary (parser L5–L6) is proven by bytes already captured.
+**L3 — the camera's HTTP streaming endpoint session semantics (LEVEL 0, PROVEN).**
+The endpoint answers every client, but the body producer attaches for exactly
+ONE client per arming (E13). Network below (L0–L2) is healthy; everything
+above (parser L5–L6 on real captured bytes) is proven — the failure is the
+camera-side single-shot session lifecycle, compounded by the two-stage wedge
+cascade when clients retry (RC-7).
 
 ## 4. Root Cause
 
-**Not yet conclusively proven (task §58).** Ranked candidates with their
-decisive experiments — see `ROOT-CAUSE-MAP.md` §2:
+**PROVEN — RC-6 + RC-7 (LEVEL 0, field evidence 2026-09-04):**
 
-1. **RC-1 (LEVEL 1):** request-style dependency unproven; old conclusion is an
-   ordering-artifact suspect → `http_variants_probe.py` (isolated, repeated).
-2. **RC-2 (LEVEL 2):** stream is armed over **Bluetooth** (`cmd-req`/`liveview`,
-   Samsung Accessory channel 204) in the reference app; HTTP-only clients may
-   get a burst, not a continuous stream → `raw_camera_stream_dump.py --seconds 30`.
-3. **RC-3 (LEVEL 1):** `codec=2` undocumented; h264-vs-hevc assumed →
-   `test_h264_decode.py` on real extracted AUs.
-4. **RC-4 (LEVEL 0, FIXED):** Hub state-loop freeze — explains the observed
-   `camera.state=disconnected` contradiction (task §44 answered: yes, the state
-   could be stale).
-5. **RC-5 (LEVEL 0, FIXED):** Hub-side probe competition for the single session.
+1. **RC-6 — single-shot streamer.** Client #1 received 9.2 MB continuous
+   (~9.2 Mbps); client #2 with IDENTICAL request bytes received 206 headers
+   and ZERO body; client #3 timed out (E13). The stock app re-arms over
+   Bluetooth before each session (E8); an HTTP-only Hub cannot re-arm, so
+   every reconnect after the first session is a starving client #2 — the
+   user's freeze.
+2. **RC-7 — two-stage wedge cascade (decisive lifecycle probe, E16/E17).**
+   After the first session ends there is NO self-heal (+1/+6/+21/+51 s), no
+   concurrent steal (both clients stall), and no late re-arm; worse, repeated
+   attempts drive the camera from **stage 1** (streamer wedged, control
+   plane 23/21/8888 still alive — proven at 11:57:59) into **stage 2** (host
+   unreachable, WinError 10065 on ALL ports) — verdict `NO_REARM_FOUND`.
+   The only stage-2 recovery is a physical power cycle. Blind retries are
+   therefore actively harmful — they are what pushed the camera to stage 2
+   in the field.
+
+Consequences implemented: terminal WEDGED stop instead of blind retries,
+broker-guarded single session, stage-1-only re-arm ladder (8888 exec-CGI),
+and the Capability Center that ranks every UI feature by its guarantee
+level (features ordered per the operational law in ROOT-CAUSE-MAP §2/RC-7).
+
+Remaining open item (RC-3, LEVEL 1): the true codec of this unit's stream
+(`codec=2` undocumented) — decidable by `tools/test_h264_decode.py` on real
+AUs; it affects decode only, not the session lifecycle root cause.
 
 ## 5. Evidence
 
 * Real diagnostic DG-20260903-001 (reachable/TCP/206/65536B/chunks/VID0) — quoted in task doc §2.
 * Code proofs: `app/diagnostics/probes.py` (cap), `app/camera/manager.py` (race, probe loop), `app/diagnostics/errors.py` (snapshot semantics).
 * Vendor proofs: `Gear360App/README.md:21-31`, `MessageSender.kt:96-102`, `BTMessage.kt:668-671` (BT liveview arming); `MediaExtractor.java:114-132` (plain GET, 768 KiB buffers, no Range); `Extractor.kt:16-27,105-270,311-383` (container math); `gear360_modding/extracted/mod.sh`, `G360POWE_G360POW.sh`, `top.html` (services + capture command); `keyscan360.c` (key→script dispatcher, unrelated to shutter command).
+* Field evidence 2026-09-04 (archived in `diagnostics/raw/evidence/`):
+  * `20260904_115725_tcp_stream_probe.json` — client #1: 9.2 MB continuous (E13/E4);
+  * `20260904_115729_raw_camera_probe.json` — client #2: HEADERS_WITHOUT_BODY (E13);
+  * `20260904_115733_raw_camera_stream_dump.json` — client #3: connect timeout (E13);
+  * `20260904_115759_camera_control_probe.json` — control plane alive 26 s AFTER the wedge (E17, stage-1 window);
+  * `20260904_115800_investigation_summary.json` — failure tree of that run;
+  * `20260904_123314_session_lifecycle_probe.json` — DECISIVE: no self-heal / no steal / no late re-arm, stage-2 total host unreachability, `NO_REARM_FOUND` (E16/RC-7).
 * New instrumented evidence: every field run writes `diagnostics/raw/evidence/*.json`.
 
 ## 6. Why Previous Fixes Failed

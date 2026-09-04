@@ -1,0 +1,211 @@
+{
+  "host": "192.168.43.1",
+  "port": 7679,
+  "path": "/livestream_high.avi",
+  "apply": true,
+  "st0_baseline": {
+    "label": "A-baseline",
+    "read_seconds": 5.0,
+    "connect_ms": 38.83,
+    "status": 206,
+    "ttfb_ms": 69.2,
+    "bytes": 5532875,
+    "first_body_ms": 571.2,
+    "stalled_after_ms": null,
+    "result": "BODY_OK"
+  },
+  "sockets_after_baseline": {
+    "label": "after-baseline",
+    "rows": [
+      {
+        "local": "012BA8C0:1DFF",
+        "remote": "00000000:0000",
+        "state": "LISTEN"
+      }
+    ],
+    "counts": {
+      "LISTEN": 1
+    }
+  },
+  "st1_self_heal": [
+    {
+      "label": "B-heal+1s",
+      "read_seconds": 5.0,
+      "connect_ms": 5.26,
+      "status": 206,
+      "ttfb_ms": 10.7,
+      "bytes": 0,
+      "first_body_ms": null,
+      "stalled_after_ms": null,
+      "result": "HEADERS_ONLY"
+    },
+    {
+      "label": "B-heal+6s",
+      "read_seconds": 5.0,
+      "connect_ms": 40.34,
+      "result": "ERROR",
+      "error": "TimeoutError: timed out"
+    },
+    {
+      "label": "B-heal+21s",
+      "read_seconds": 5.0,
+      "connect_ms": 5.78,
+      "status": 200,
+      "ttfb_ms": 2906.4,
+      "bytes": 0,
+      "closed_by_camera": true,
+      "first_body_ms": null,
+      "stalled_after_ms": null,
+      "result": "HEADERS_ONLY"
+    },
+    {
+      "label": "B-heal+51s",
+      "read_seconds": 5.0,
+      "result": "ERROR",
+      "error": "TimeoutError: timed out"
+    }
+  ],
+  "st2_concurrent": {
+    "a": {
+      "label": "A-holder",
+      "read_seconds": 5.0,
+      "result": "ERROR",
+      "error": "TimeoutError: timed out"
+    },
+    "b": {
+      "label": "B-joiner",
+      "read_seconds": 4.0,
+      "result": "ERROR",
+      "error": "TimeoutError: timed out"
+    }
+  },
+  "st3_rearm": {
+    "R0_control_wait": {
+      "action": {
+        "desc": "no action \u2014 wedge persistence control"
+      },
+      "verify": {
+        "label": "C-after-R0_control_wait",
+        "read_seconds": 4.0,
+        "result": "ERROR",
+        "error": "OSError: [WinError 10065] A socket operation was attempted to an unreachable host"
+      },
+      "sockets_before": {
+        "label": "R0_control_wait/before",
+        "rows": [],
+        "error": "URLError: <urlopen error [WinError 10065] A socket operation was attempted to an unreachable host>",
+        "counts": {}
+      },
+      "sockets_after": {
+        "label": "R0_control_wait/after",
+        "rows": [],
+        "error": "URLError: <urlopen error [WinError 10065] A socket operation was attempted to an unreachable host>",
+        "counts": {}
+      }
+    },
+    "R1_root_8888": {
+      "action": {
+        "desc": "GET http://cam:8888/ (touch mod web root)",
+        "error": "<urlopen error [WinError 10065] A socket operation was attempted to an unreachable host>"
+      },
+      "verify": {
+        "label": "C-after-R1_root_8888",
+        "read_seconds": 4.0,
+        "result": "ERROR",
+        "error": "OSError: [WinError 10065] A socket operation was attempted to an unreachable host"
+      },
+      "sockets_before": {
+        "label": "R1_root_8888/before",
+        "rows": [],
+        "error": "URLError: <urlopen error [WinError 10065] A socket operation was attempted to an unreachable host>",
+        "counts": {}
+      },
+      "sockets_after": {
+        "label": "R1_root_8888/after",
+        "rows": [],
+        "error": "URLError: <urlopen error [WinError 10065] A socket operation was attempted to an unreachable host>",
+        "counts": {}
+      }
+    },
+    "R2_exec_ps": {
+      "action": {
+        "desc": "execute CGI 'ps'",
+        "command": "ps",
+        "error": "URLError: <urlopen error [WinError 10065] A socket operation was attempted to an unreachable host>"
+      },
+      "verify": {
+        "label": "C-after-R2_exec_ps",
+        "read_seconds": 4.0,
+        "result": "ERROR",
+        "error": "OSError: [WinError 10065] A socket operation was attempted to an unreachable host"
+      },
+      "sockets_before": {
+        "label": "R2_exec_ps/before",
+        "rows": [],
+        "error": "URLError: <urlopen error [WinError 10065] A socket operation was attempted to an unreachable host>",
+        "counts": {}
+      },
+      "sockets_after": {
+        "label": "R2_exec_ps/after",
+        "rows": [],
+        "error": "URLError: <urlopen error [WinError 10065] A socket operation was attempted to an unreachable host>",
+        "counts": {}
+      }
+    },
+    "R3_exec_internal_wget": {
+      "action": {
+        "desc": "execute CGI: internal wget 127.0.0.1:7679 (does streamer serve INSIDE?)",
+        "command": "wget -q -O /tmp/g360_rearm.bin --header='Range: bytes=0-' --timeout=5 http://127.0.0.1:7679/livestream_high.avi; ls -l /tmp/g360_rearm.bin; rm -f /tmp/g360_rearm.bin",
+        "error": "URLError: <urlopen error [WinError 10065] A socket operation was attempted to an unreachable host>"
+      },
+      "verify": {
+        "label": "C-after-R3_exec_internal_wget",
+        "read_seconds": 4.0,
+        "result": "ERROR",
+        "error": "OSError: [WinError 10065] A socket operation was attempted to an unreachable host"
+      },
+      "sockets_before": {
+        "label": "R3_exec_internal_wget/before",
+        "rows": [],
+        "error": "URLError: <urlopen error [WinError 10065] A socket operation was attempted to an unreachable host>",
+        "counts": {}
+      },
+      "sockets_after": {
+        "label": "R3_exec_internal_wget/after",
+        "rows": [],
+        "error": "URLError: <urlopen error [WinError 10065] A socket operation was attempted to an unreachable host>",
+        "counts": {}
+      }
+    },
+    "R4_kill_streamer": {
+      "action": {
+        "desc": "execute CGI: kill the 7679 listener pid (init must respawn it)",
+        "command": "port=1DFF; for line in $(cat /proc/net/tcp); do case $line in *:$port) ;; esac; done; inode=$(awk 'NR>1 && $2 ~ /:1DFF$/ && $4 == \"0A\" {print $10}' /proc/net/tcp | head -1); if [ -z \"$inode\" ]; then echo 'no 7679 listener found'; else for p in /proc/[0-9]*; do for fd in $p/fd/*; do lnk=$(readlink $fd 2>/dev/null); case \"$lnk\" in socket:[$inode]*) pid=${p#/proc/}; echo \"killing pid $pid $(cat $p/cmdline 2>/dev/null | tr '\\0' ' ')\"; kill -TERM $pid; break 2;; esac; done; done; fi",
+        "error": "URLError: <urlopen error [WinError 10065] A socket operation was attempted to an unreachable host>"
+      },
+      "verify": {
+        "label": "C-after-R4_kill_streamer",
+        "read_seconds": 4.0,
+        "result": "ERROR",
+        "error": "OSError: [WinError 10065] A socket operation was attempted to an unreachable host"
+      },
+      "sockets_before": {
+        "label": "R4_kill_streamer/before",
+        "rows": [],
+        "error": "URLError: <urlopen error [WinError 10065] A socket operation was attempted to an unreachable host>",
+        "counts": {}
+      },
+      "sockets_after": {
+        "label": "R4_kill_streamer/after",
+        "rows": [],
+        "error": "URLError: <urlopen error [WinError 10065] A socket operation was attempted to an unreachable host>",
+        "counts": {}
+      }
+    }
+  },
+  "rearm_winners": [],
+  "verdict": "NO_REARM_FOUND",
+  "tool": "session_lifecycle_probe",
+  "tool_version": "inv-1.0",
+  "ts": "2026-09-04T12:33:14"
+}

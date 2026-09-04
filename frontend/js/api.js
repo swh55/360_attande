@@ -51,6 +51,8 @@ export const api = {
   disconnect: () => api.post("/api/camera/disconnect"),
   restartCam: () => api.post("/api/camera/restart"),
   rearmCam: (apply = false) => api.post(`/api/camera/rearm?apply=${apply ? "true" : "false"}`),
+  capabilities: () => api.get("/api/camera/capabilities"),
+  probeArming: () => api.post("/api/camera/probe/arming"),
   takePhoto: () => api.post("/api/camera/photo"),
   controlStatus: () => api.get("/api/camera/control/status"),
   counters: () => api.get("/api/stream/counters"),

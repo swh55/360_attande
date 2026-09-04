@@ -9,6 +9,7 @@ import { renderEvents } from "./views/events.js";
 import { renderAI } from "./views/ai.js";
 import { renderPeople } from "./views/people.js";
 import { renderCamera } from "./views/camera.js";
+import { renderCapabilities } from "./views/capabilities.js";
 import { renderSettings } from "./views/settings.js";
 import { renderDiagnostics } from "./views/diagnostics.js";
 
@@ -69,6 +70,7 @@ const NAV = [
   ["ai", "ai", "✦"],
   ["people", "people", "☺"],
   ["camera", "camera", "⚙"],
+  ["capabilities", "capabilities", "🧭"],
   ["diagnostics", "diagnostics", "🩺"],
   ["settings", "settings", "🔧"],
 ];
@@ -100,6 +102,7 @@ const views = {
   ai: renderAI,
   people: renderPeople,
   camera: renderCamera,
+  capabilities: renderCapabilities,
   diagnostics: renderDiagnostics,
   settings: renderSettings,
 };
