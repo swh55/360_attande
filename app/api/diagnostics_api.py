@@ -362,6 +362,128 @@ def diag_capture_delete(name: str):
         return _err("http", exc)
 
 
+# ---- independent camera test (investigation §47) ----------------------------------
+@router.post("/independent-test")
+def diag_independent_test():
+    """§47 — Independent Camera Test.
+
+    Uses a SMALL self-contained implementation (its own socket + HTTP code,
+    no CameraManager / StreamPipeline / FrameBus / decoder objects) to answer
+    'does the camera serve a stream to a minimal client?' — the architectural
+    counter-test for every Hub-side failure.
+
+    Session-safe by design (§49/§51): while the live session exists it reads
+    live-pipeline evidence and opens ZERO connections (the camera's stream
+    server is single-session; a second client can steal the session).
+    """
+    import socket
+    import time as _time
+
+    hub = _hub()
+    host = settings_svc.get("camera.host")
+    port = int(settings_svc.get("camera.port", 7679))
+    path = settings_svc.get("camera.stream_path", "/livestream_high.avi")
+    url = f"http://{host}:{port}{path}"
+    out: dict = {"url": url, "mode": "independent", "implementation": "raw socket, no Hub objects"}
+
+    p = hub.camera._pipeline
+    if p is not None:
+        parser = p.parser
+        out.update({
+            "mode": "live-pipeline (no probe connection opened)",
+            "camera_state": hub.camera.state,
+            "phase": hub.camera.phase(),
+            "http_status": p.http_status,
+            "bytes_seen": parser.bytes_seen if parser else 0,
+            "chunks_seen": parser.chunks_seen if parser else 0,
+            "decoded_frames": p.decoded_frames,
+            "note": "live session holds the single stream session — independent "
+                    "test reports live evidence instead of competing for it",
+        })
+        out["verdict"] = ("LIVE_ACTIVE" if (parser and parser.bytes_seen > 0)
+                          else "LIVE_SESSION_STALLED")
+        return out
+
+    # truly independent probe (app idle → the camera is free)
+    request = (f"GET {path} HTTP/1.1\r\nHost: {host}:{port}\r\n"
+               f"User-Agent: g360-independent-test\r\nAccept: */*\r\n"
+               f"Range: bytes=0-\r\nConnection: close\r\n\r\n")
+    t0 = _time.time()
+    try:
+        with socket.create_connection((host, port), timeout=3) as sock:
+            out["tcp"] = True
+            out["tcp_ms"] = round((_time.time() - t0) * 1000, 1)
+            sock.settimeout(5.0)
+            sock.sendall(request.encode("ascii"))
+            buf = b""
+            while b"\r\n\r\n" not in buf and len(buf) < 32768:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                buf += chunk
+            head, _, rest = buf.partition(b"\r\n\r\n")
+            status_line = head.split(b"\r\n", 1)[0].decode("latin-1", "replace")
+            out["status_line"] = status_line
+            body = len(rest)
+            deadline = _time.time() + 3.0
+            while body < 65536 and _time.time() < deadline:
+                try:
+                    chunk = sock.recv(32768)
+                except socket.timeout:
+                    break
+                if not chunk:
+                    out["closed"] = True
+                    break
+                body += len(chunk)
+            out["bytes_received"] = body
+    except Exception as exc:
+        out["error"] = f"{type(exc).__name__}: {exc}"
+        out["verdict"] = "UNREACHABLE"
+        return out
+
+    status_ok = " 206" in out.get("status_line", "") or " 200" in out.get("status_line", "")
+    if body > 65536:
+        out["verdict"] = "CONTINUOUS_BEYOND_64K"
+    elif body > 0:
+        out["verdict"] = f"BODY_{body}_B" + ("" if status_ok else "_BAD_STATUS")
+    else:
+        out["verdict"] = "HEADERS_WITHOUT_BODY"
+    return out
+
+
+# ---- offline capture analysis (investigation §48) ---------------------------------
+@router.post("/captures/analyze")
+def diag_capture_analyze(name: str = ""):
+    """§48 — Analyze Offline: run the full structural analysis against a
+    SAVED capture (never the camera). Chunk boundary table + VID0 fields +
+    signature counts + anomalies, so analysis repeats without the camera."""
+    cap = name or latest_capture()
+    if not cap:
+        raise HTTPException(404, "no captures saved yet — use Capture Real Stream first")
+    try:
+        data = load_slice(cap, 0, 8 * 1024 * 1024)
+    except Exception as exc:
+        raise HTTPException(404, f"capture unreadable: {exc}")
+    out: dict = {"capture": cap, "bytes_loaded": len(data), "source": "offline"}
+    fb = first_bytes_report(data[:1024])
+    out["first_bytes"] = {"signatures": fb["signatures"]}
+    vid0 = analyze_vid0(_vid0_from(data))
+    out["vid0"] = {"verdict": vid0.get("verdict"), "summary": vid0.get("summary"),
+                   "fields": vid0.get("fields")}
+    st = validate_structure(data)
+    out["structure"] = {"valid_rows": st.get("valid_rows"),
+                        "invalid_rows": st.get("invalid_rows"),
+                        "resyncs": st.get("resyncs")}
+    scan = scan_signatures(data)
+    out["signatures"] = {"counts": scan.get("counts"), "total": scan.get("total")}
+    complete_vd = int(out["structure"].get("valid_rows", 0) > 0 and
+                      scan.get("counts", {}).get("00VD", 0) > 0)
+    out["verdict"] = ("STRUCTURE_VALID_WITH_00VD" if complete_vd
+                      else ("NO_00VD_IN_SAMPLE" if out["vid0"].get("verdict") == "VALID"
+                            else "STRUCTURE_NOT_RECOGNIZED"))
+    return out
+
+
 # ---- reports -------------------------------------------------------------------------
 @router.get("/report")
 def diag_report(session: str = ""):

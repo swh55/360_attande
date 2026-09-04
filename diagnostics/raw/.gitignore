@@ -1,0 +1,9 @@
+*.bin
+*.avi
+*.h264
+*.hevc
+*.jpg
+*.jpeg
+*.png
+photos/
+extracted/

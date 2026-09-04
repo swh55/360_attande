@@ -46,3 +46,6 @@ dev.log
 
 # third-party reference sources (study-only, never committed)
 reference/
+
+# third-party reference sources (study-only, never committed)
+vendor/

@@ -37,7 +37,9 @@ export async function renderDiagnostics(container) {
       <button class="btn primary" id="btnRun">▶ ${t("diag.run")}</button>
       <button class="btn" id="btnExportJson">⬇ ${t("diag.export_json")}</button>
       <button class="btn" id="btnExportZip">🗜 ${t("diag.export_zip")}</button>
+      <button class="btn" id="btnIndep" title="${t("diag.independent_hint")}">🧫 ${t("diag.independent")}</button>
     </div>
+    <div id="indepOut" style="margin-top:8px"></div>
     <div class="progress" id="diagProgress" hidden><div></div></div>
     <div class="subtle" id="diagSession" style="margin-top:6px"></div>
   </div>
@@ -98,7 +100,9 @@ export async function renderDiagnostics(container) {
         <div class="btn-row">
           <input type="number" id="capMb" value="2" min="0.5" max="32" step="0.5" style="width:90px" title="${t("diag.size_mb")}">
           <button class="btn sm primary" id="btnCap">⏺ ${t("diag.capture_btn")}</button>
+          <button class="btn sm" id="btnAnalyze" title="${t("diag.analyze_hint")}">🧪 ${t("diag.analyze_offline")}</button>
         </div>
+        <div id="analyzeOut" style="margin-top:8px"></div>
         <div id="capList" class="scroll-y" style="margin-top:8px"></div>
       </div>
       <div class="card"><h3>📊 ${t("diag.metrics")}</h3><div class="diag-grid" id="metrics"></div></div>
@@ -377,6 +381,41 @@ export async function renderDiagnostics(container) {
       }
     } catch { /* silent */ }
   }
+  // ---- independent camera test (investigation §47) ----
+  $("btnIndep").onclick = async () => {
+    const btn = $("btnIndep");
+    btn.disabled = true;
+    $("indepOut").innerHTML = `<span class="subtle">…</span>`;
+    try {
+      const r = await api.post("/api/diagnostics/independent-test");
+      const v = r.verdict || "?";
+      const good = v.startsWith("CONTINUOUS") || v === "LIVE_ACTIVE" || v.startsWith("BODY");
+      $("indepOut").innerHTML = `
+        <div class="badge ${good ? "ok" : "err"}">${esc(v)}</div>
+        <pre class="subtle" style="white-space:pre-wrap;margin:6px 0 0">${esc(JSON.stringify(r, null, 1))}</pre>`;
+      toast(`${t("diag.independent")}: ${v}`, good ? "ok" : "err");
+    } catch (e) {
+      $("indepOut").innerHTML = `<span style="color:var(--bad)">${esc(e.message || e)}</span>`;
+    } finally { btn.disabled = false; }
+  };
+
+  // ---- offline capture analysis (investigation §48) ----
+  $("btnAnalyze").onclick = async () => {
+    const btn = $("btnAnalyze");
+    btn.disabled = true;
+    $("analyzeOut").innerHTML = `<span class="subtle">…</span>`;
+    try {
+      const r = await api.post("/api/diagnostics/captures/analyze");
+      const good = r.verdict === "STRUCTURE_VALID_WITH_00VD";
+      $("analyzeOut").innerHTML = `
+        <div class="badge ${good ? "ok" : "err"}">${esc(r.verdict)}</div>
+        <pre class="subtle" style="white-space:pre-wrap;margin:6px 0 0">${esc(JSON.stringify({capture: r.capture, bytes: r.bytes_loaded, vid0: r.vid0, structure: r.structure, signatures: r.signatures}, null, 1))}</pre>`;
+      toast(`${t("diag.analyze_offline")}: ${r.verdict}`, good ? "ok" : "err");
+    } catch (e) {
+      $("analyzeOut").innerHTML = `<span style="color:var(--bad)">${esc(e.message || e)}</span>`;
+    } finally { btn.disabled = false; }
+  };
+
   $("btnCap").onclick = async () => {
     const mb = parseFloat($("capMb").value) || 2;
     toast("⏺ …", "");

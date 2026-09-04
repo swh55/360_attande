@@ -18,6 +18,7 @@ from ..core import settings as settings_svc
 from ..media.decoder import StreamPipeline
 from ..media.ffmpeg import locate
 from ..media.framebus import FrameBus
+from .session_broker import get_broker
 
 LOG = get("camera")
 
@@ -43,6 +44,38 @@ class CameraManager:
         self.camera_reachable = False
 
     # ---- info ---------------------------------------------------------------
+    def layers(self) -> dict:
+        """The SEVEN distinct stream layers (investigation task §45).
+
+        Reachable ≠ TCP-Connected ≠ HTTP-Connected ≠ Stream-Active ≠
+        Parser-Active ≠ Decoder-Active ≠ Frame-Ready. The UI and every
+        error path must be able to name WHICH layer is the last one alive.
+        """
+        p = self._pipeline
+        parser = p.parser if p else None
+        bytes_seen = parser.bytes_seen if parser else 0
+        chunks = parser.chunks_seen if parser else 0
+        http_ok = bool(p and p.http_ok)
+        now = time.time()
+        stream_active = bool(p and p.last_chunk_wall
+                             and (now - p.last_chunk_wall) < 3.0)
+        parser_active = bool(parser and parser.info.valid and chunks > 0)
+        decoder_active = bool(p and p.decoder is not None
+                              and p.decoder.is_running)
+        frame_ready = bool(p and p.last_frame_wall
+                           and (now - p.last_frame_wall) < 3.0)
+        return {
+            "reachable": self.camera_reachable,          # TCP SYN succeeds (health probe or live bytes)
+            "http_connected": http_ok,                   # 200/206 received
+            "stream_active": stream_active,              # container bytes still arriving
+            "parser_active": parser_active,              # chunks parsed, VID0 valid
+            "decoder_active": decoder_active,            # ffmpeg alive
+            "frame_ready": frame_ready,                  # decoded frame < 3s old
+            "bytes_seen": bytes_seen,
+            "chunks_seen": chunks,
+            "decoded_frames": p.decoded_frames if p else 0,
+        }
+
     def info(self) -> dict:
         cfg = {
             "host": settings_svc.get("camera.host"),
@@ -62,6 +95,8 @@ class CameraManager:
         return {
             "state": self.state,
             "phase": self.phase(),
+            "layers": self.layers(),
+            "session": get_broker().status(),
             "config": cfg,
             "stream_url": f"http://{cfg['host']}:{cfg['port']}{cfg['stream_path']}",
             "latency_ms": self.last_latency_ms,
@@ -127,6 +162,12 @@ class CameraManager:
                 self.error = ff.error
                 self.error_count += 1
                 return self.info()
+            # single-session camera: claim the broker BEFORE any byte flows
+            if not get_broker().acquire("live"):
+                self.state = "error"
+                self.error = "another component holds the camera session"
+                self.error_count += 1
+                return self.info()
             cfg = {
                 "host": settings_svc.get("camera.host"),
                 "port": settings_svc.get("camera.port"),
@@ -160,6 +201,7 @@ class CameraManager:
             self.state = "disconnected"
             self.started_at = 0.0
             self._stop_state.set()
+            get_broker().release("live")
             LOG.info("Disconnected by user")
             event_bus.publish("camera_state", {"state": "disconnected"})
         return self.info()
@@ -175,6 +217,7 @@ class CameraManager:
                 self._pipeline = None
             self.state = "disconnected"
             self._stop_state.set()
+            get_broker().release("live")
         # stale frame must never masquerade as a live one after restart
         self.bus.clear()
         time.sleep(0.5)   # camera settle: single-session server releases the socket
@@ -251,7 +294,16 @@ class CameraManager:
 
         CONNECTED (headers) is NOT STREAM READY is NOT FRAME READY — the UI
         must see the difference, e.g. 'headers but no body' stalls.
+
+        Race fix (investigation finding F2): disconnect()/restart_stream()
+        set `_stop_state`, but the old thread may still be alive for a short
+        window. is_alive() alone would then SKIP creating a new loop and the
+        old thread would exit right after — leaving camera.state FROZEN
+        (the exact 'state says disconnected/stuck while bytes flow' class of
+        symptom). We now join the doomed thread before starting a new one.
         """
+        if self._state_thread is not None and self._stop_state.is_set():
+            self._state_thread.join(timeout=2.5)   # it must exit within ~1.5s
         if self._state_thread is None or not self._state_thread.is_alive():
             self._stop_state.clear()
             self._state_thread = threading.Thread(target=self._state_loop, name="camera-state", daemon=True)
@@ -262,6 +314,7 @@ class CameraManager:
             p = self._pipeline
             if p is None:
                 return
+            get_broker().heartbeat("live")   # keep the cross-process lock alive
             fresh_chunks = p.last_chunk_wall and (time.time() - p.last_chunk_wall) < 3.0
             fresh_frames = p.last_frame_wall and (time.time() - p.last_frame_wall) < 3.0
             if p.error:
@@ -270,6 +323,13 @@ class CameraManager:
                     self.error = p.error
                     self.error_count += 1
                     event_bus.publish("camera_state", {"state": "error", "error": p.error})
+                # a dead pipeline thread means the session is truly over —
+                # free the single-session broker so Connect can run again
+                if (p._thread is not None and not p._thread.is_alive()
+                        and self._pipeline is p):
+                    self._pipeline = None
+                    get_broker().release("live")
+                    return
             elif fresh_frames or fresh_chunks:
                 if self.state != "streaming":
                     self.state = "streaming"
@@ -319,8 +379,27 @@ class CameraManager:
         self._stop_probe.set()
 
     def _probe_loop(self) -> None:
+        """TCP reachability at a fixed rate — WITH one exception:
+
+        While the live pipeline holds the camera's single stream session,
+        opening extra TCP connections to port 7679 competes with the live
+        stream on a fragile embedded server (investigation §51 / finding F3).
+        When a session exists we DERIVE reachability from live transport
+        reality instead of knocking on the door.
+        """
         interval = float(settings_svc.get("camera.health_interval", 5))
         while not self._stop_probe.wait(interval):
+            p = self._pipeline
+            if p is not None:
+                parser = p.parser
+                flowing = bool(parser and parser.bytes_seen > 0
+                               and p.last_chunk_wall
+                               and (time.time() - p.last_chunk_wall) < 10.0)
+                # live evidence is stronger than a TCP handshake
+                self.camera_reachable = flowing or self.camera_reachable
+                if flowing:
+                    self.last_probe_at = round(time.time(), 3)
+                continue
             host = settings_svc.get("camera.host")
             port = int(settings_svc.get("camera.port", 7679))
             t0 = time.time()
