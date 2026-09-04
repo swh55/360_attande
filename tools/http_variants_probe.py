@@ -94,13 +94,35 @@ def run_variant(name: str, host: str, port: int, path: str, extra: dict,
     return out
 
 
+def resolve_order(order_arg: str) -> list[str]:
+    """Accept full variant keys AND short letters (A..E) — the orchestrator
+    passes '--order B,A,C,D,E'; before inv-1.1 the letter filter silently
+    emptied the list, so PHASE 2b ran ZERO variants (evidence 2026-09-04
+    115735: order=[] results=[]) and the failure-tree flag
+    'HTTP style dependency' was an ARTIFACT, not evidence."""
+    aliases = {}
+    for key in VARIANTS:
+        aliases[key] = key
+        aliases[key.split("_")[0].upper()] = key   # "B" -> "B_range_open"
+    resolved = []
+    for token in order_arg.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        key = aliases.get(token) or aliases.get(token.upper())
+        if key and key not in resolved:
+            resolved.append(key)
+    return resolved
+
+
 def main() -> int:
     ap = base_parser("Isolated HTTP request-variant matrix")
     ap.add_argument("--read-seconds", type=float, default=4.0,
                     help="body read window per variant (default 4)")
     ap.add_argument("--settle", type=float, default=3.0,
                     help="camera settle gap BETWEEN variants (default 3s)")
-    ap.add_argument("--order", default="A,B,C,D,E", help="comma list of variants")
+    ap.add_argument("--order", default="A,B,C,D,E",
+                    help="comma list of variants (letters or full keys)")
     ap.add_argument("--repeat", type=int, default=1, help="full-matrix repetitions (default 1)")
     ap.add_argument("--skip-guard", action="store_true",
                     help="alias of --override for this probe (kept for clarity)")
@@ -108,11 +130,18 @@ def main() -> int:
     override = args.override or args.skip_guard
 
     ensure_dirs()
-    hr(f"PHASE 2b — ISOLATED HTTP VARIANTS  order={args.order} repeat={args.repeat}")
+    order_list = resolve_order(args.order)
+    hr(f"PHASE 2b — ISOLATED HTTP VARIANTS  order={order_list} repeat={args.repeat}")
+    if not order_list:
+        fail(f"order '{args.order}' matched no variant — valid: "
+             + ", ".join(VARIANTS))
+        save_evidence("http_variants_probe", {
+            "order": [], "repeat": args.repeat, "results": [], "summary": {},
+            "error": f"unmatched order '{args.order}'"})
+        return 2
     lock = guard_stream_access(override, "http_variants_probe")
 
     results: list = []
-    order_list = [s.strip() for s in args.order.split(",") if s.strip() in VARIANTS]
     for rep in range(max(1, args.repeat)):
         for name in order_list:
             hr(f"variant {name}  (rep {rep + 1}/{args.repeat})")

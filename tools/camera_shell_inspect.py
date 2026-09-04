@@ -1,193 +1,262 @@
 #!/usr/bin/env python3
-"""PHASE 3 — Camera-side inspection via the mod's Telnet shell (§12-15, §33-35).
+"""PHASE 3 — Camera-side inspection (inv-2.0, channel: 8888 execute-CGI).
 
-Runs READ-ONLY commands inside the camera (never kills/restarts anything):
-  ps, netstat -ln, ifconfig, mount, df, free, top -n1
-  → who LISTENS on 7679 (netstat/proc/net/tcp → /proc/<pid>/cmdline+exe)
-  → does the stream serve correctly from INSIDE (localhost:7679 via wget)
+History: inv-1.0 used telnet only; on the user's unit (evidence 20260904
+115759) every command answered "Password:"/"Login incorrect" and ZERO
+commands executed — verdict LISTENER_UNCONFIRMED was meaningless. The same
+run's PHASE 4 (camera_control_probe) PROVED that the mod's web shell on
+port 8888 executes arbitrary commands:
 
-Answers task §13 (who owns 7679), §14 (stock service vs mod — the mod never
-touches 7679, so the listener is STOCK firmware), §15 (internal stream test).
+    GET http://<cam>:8888/cgi-bin/execute?rawcmd=<url-encoded cmd>
+    → 200 + <pre>Executing:  ...\n<output></pre>
+
+This version therefore runs its READ-ONLY inspection through the execute
+CGI (primary) and keeps telnet as a fallback. Never kills/restarts anything
+here — the invasive re-arm experiment lives in session_lifecycle_probe.py.
+
+Answers (task §12-15, §33-35):
+  * who LISTENS on 7679 (port 0x1DFF in /proc/net/tcp → pid via fd map)
+  * is the streamer a STOCK firmware service (mod never touches 7679, E9)
+  * does the stream serve INSIDE the camera (localhost:7679 wget self-test)
+    — the decisive 'wedge is external or internal' discriminator
 """
 from __future__ import annotations
 
+import argparse
 import re
 import socket
 import sys
 import time
+import urllib.parse
+import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from g360_common import ensure_dirs, fail, hr, info, ok, save_evidence, warn
 
-_IAC = 0xFF
+STREAM_PORT = 7679
+STREAM_PORT_HEX = "1DFF"
+
+# read-only inspection commands (busybox-safe)
+CMDS = {
+    "ps": "ps",
+    "proc_net_tcp": "cat /proc/net/tcp",
+    "who_owns_7679": (
+        "for p in /proc/[0-9]*; do for fd in $p/fd/*; do "
+        "read lnk < $fd 2>/dev/null; "
+        'case "$lnk" in *socket:*) ino=${lnk#socket:[}; ino=${ino%]}; '
+        "grep -q \" $ino \" /proc/net/tcp 2>/dev/null && "
+        "echo \"$p $(cat $p/cmdline 2>/dev/null | tr '\\0' ' ')\";; esac; "
+        "done; done 2>/dev/null | head -40"
+    ),
+    "streamer_search": (
+        "ps | grep -iE 'stream|video|live|camera|avi|preview|dnd|httpd' | grep -v grep"
+    ),
+    "init_check": "ls /etc/init.d/rcS 2>/dev/null; ls /etc/inittab 2>/dev/null",
+}
+INTERNAL_WGET = (
+    "wget -q -O /tmp/g360_selftest.bin --header='Range: bytes=0-' "
+    "--timeout=6 http://127.0.0.1:7679/livestream_high.avi; "
+    "ls -l /tmp/g360_selftest.bin; "
+    "head -c 48 /tmp/g360_selftest.bin | od -A x -t x1z | head -3; "
+    "rm -f /tmp/g360_selftest.bin"
+)
 
 
-def telnet_session(host: str, port: int, commands: list[str], timeout: float = 6.0) -> dict:
-    """Open ONE telnet session and run several commands (avoids reconnect churn)."""
-    results: dict = {}
-    with socket.create_connection((host, port), timeout=timeout) as sock:
-        sock.settimeout(timeout)
+def execute_cgi(host: str, command: str, timeout: float = 15.0) -> dict:
+    """Run one command through the mod's 8888 execute CGI. Returns raw text."""
+    url = (f"http://{host}:8888/cgi-bin/execute?rawcmd="
+           + urllib.parse.quote(command, safe=""))
+    out: dict = {"command": command, "url": url}
+    t0 = time.time()
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as r:
+            body = r.read().decode("utf-8", "replace")
+        out["http_status"] = getattr(r, "status", 200)
+    except Exception as exc:
+        out["error"] = f"{exc.__class__.__name__}: {exc}"
+        out["elapsed_ms"] = round((time.time() - t0) * 1000)
+        return out
+    out["elapsed_ms"] = round((time.time() - t0) * 1000)
+    # extract the <pre>…</pre> payload the CGI returns
+    m = re.search(r"<pre>(.*?)</pre>", body, re.S)
+    text = m.group(1) if m else body
+    # drop the CGI's own 'Executing: …' echo line
+    text = re.sub(r"^Executing:[^\n]*\n?", "", text, count=1)
+    out["output"] = text.strip()
+    out["output_len"] = len(out["output"])
+    return out
 
-        def recv_until_idle(idle: float = 0.8, budget: float = 6.0) -> bytes:
+
+def telnet_fallback(host: str, command: str, timeout: float = 8.0) -> dict:
+    """Legacy channel — kept because some units run telnet without auth."""
+    out: dict = {"command": command, "channel": "telnet"}
+    try:
+        with socket.create_connection((host, 23), timeout=timeout) as sock:
+            sock.settimeout(timeout)
             buf = bytearray()
-            t0 = time.time()
-            sock.settimeout(idle)
-            while time.time() - t0 < budget:
-                try:
+            try:
+                while True:
                     data = sock.recv(8192)
-                except socket.timeout:
-                    if buf:
-                        return bytes(buf)
-                    return bytes(buf)
-                except OSError:
-                    break
-                if not data:
-                    break
-                buf.extend(data)
-            return bytes(buf)
-
-        banner = recv_until_idle()
-        # answer telnet negotiation: WONT/DONT to everything
-        out = bytearray()
-        i = 0
-        while i < len(banner):
-            b = banner[i]
-            if b == _IAC and i + 2 < len(banner):
-                cmd, opt = banner[i + 1], banner[i + 2]
-                if cmd in (0xFD, 0xFB):
-                    out += bytes([_IAC, 0xFE if cmd == 0xFD else 0xFC, opt])
-                i += 3
-                continue
-            i += 1
-        if out:
-            sock.sendall(bytes(out))
-        time.sleep(0.2)
-        for cmd in commands:
-            sock.sendall(cmd.encode("ascii") + b"\r\n")
-            time.sleep(0.3)
-            resp = recv_until_idle(idle=1.0 if len(cmd) < 30 else 2.5)
-            results[cmd] = resp.decode("ascii", "replace")
-            info(f"ran: {cmd}")
-    return results
+                    if not data:
+                        break
+                    buf.extend(data)
+                    if b"Password" in buf or b"login" in buf.lower() or b"# " in buf:
+                        break
+            except socket.timeout:
+                pass
+            sock.sendall(command.encode("ascii") + b"\r\n")
+            time.sleep(1.0)
+            buf.clear()
+            try:
+                while True:
+                    data = sock.recv(8192)
+                    if not data:
+                        break
+                    buf.extend(data)
+            except socket.timeout:
+                pass
+            text = bytes(buf).decode("ascii", "replace")
+            if "Password" in text or "Login incorrect" in text:
+                out["error"] = "auth_required (telnet)"
+            else:
+                out["output"] = text.strip()
+    except Exception as exc:
+        out["error"] = f"{exc.__class__.__name__}: {exc}"
+    return out
 
 
-def parse_7679_inodes(proc_tcp: str) -> list[str]:
-    """Extract socket inodes of LISTEN sockets on port 7679 (0x1E07) from
-    /proc/net/tcp text (local_address like 0100A8C0:1E07, st=0A listen)."""
-    inodes = []
+def parse_7679_rows(proc_tcp: str) -> dict:
+    """Socket rows on the stream port, grouped by TCP state."""
+    states = {0x01: "ESTABLISHED", 0x02: "SYN_SENT", 0x03: "SYN_RECV",
+              0x04: "FIN_WAIT1", 0x05: "FIN_WAIT2", 0x06: "TIME_WAIT",
+              0x08: "CLOSE_WAIT", 0x0A: "LISTEN"}
+    rows: list[dict] = []
     for line in proc_tcp.splitlines():
         parts = line.split()
-        if len(parts) < 10:
-            continue
-        local, st, inode = parts[1], parts[3], parts[9]
-        if ":" not in local:
+        if len(parts) < 10 or ":" not in parts[1]:
             continue
         try:
-            port = int(local.split(":")[1], 16)
-            state = int(st, 16)
+            port = int(parts[1].split(":")[1], 16)
+            state = int(parts[3], 16)
         except ValueError:
             continue
-        if port == 7679 and state == 0x0A:  # LISTEN
-            inodes.append(inode)
-    return inodes
+        if port == STREAM_PORT:
+            rows.append({"local": parts[1], "remote": parts[2],
+                         "state": states.get(state, hex(state)),
+                         "inode": parts[9] if len(parts) > 9 else "?"})
+    return {
+        "rows": rows,
+        "listen": [r for r in rows if r["state"] == "LISTEN"],
+        "established": [r for r in rows if r["state"] == "ESTABLISHED"],
+        "lingering": [r for r in rows if r["state"] in ("CLOSE_WAIT", "TIME_WAIT")],
+    }
 
 
 def main() -> int:
-    import argparse
-    ap = argparse.ArgumentParser(description="Camera-side inspection over Telnet (read-only)")
+    ap = argparse.ArgumentParser(description="Camera-side inspection (execute-CGI primary)")
     ap.add_argument("--host", default="192.168.43.1")
-    ap.add_argument("--port", type=int, default=23)
+    ap.add_argument("--skip-internal-wget", action="store_true",
+                    help="skip the localhost:7679 self-test")
     args = ap.parse_args()
     ensure_dirs()
 
-    hr(f"PHASE 3 — CAMERA-SIDE INSPECTION via telnet {args.host}:{args.port}")
-    ev: dict = {"host": args.host}
+    hr(f"PHASE 3 — CAMERA-SIDE INSPECTION via 8888 execute-CGI ({args.host})")
+    ev: dict = {"host": args.host, "channel": "execute-cgi", "commands": {}}
 
-    cmds = [
-        "ps",
-        "netstat -ltnp 2>/dev/null || netstat -ltn",
-        "cat /proc/net/tcp",
-        "ifconfig",
-        "mount",
-        "df",
-        "free",
-        "top -n 1 | head -25",
-        # targeted process search (§12)
-        "ps | grep -iE 'stream|video|live|camera|avi|wifi|http|preview' | grep -v grep",
-        # §33-34: identify the 7679 listener binary + arguments
-        ("for p in /proc/[0-9]*; do ls -l $p/fd 2>/dev/null | grep -q socket && "
-         "cat $p/cmdline 2>/dev/null | tr '\\0' ' ' | grep -qE '.' && echo \"$p: $(cat $p/cmdline | tr '\\0' ' ')\"; done | head -60"),
-    ]
-    try:
-        results = telnet_session(args.host, args.port, cmds)
-    except Exception as exc:
-        fail(f"telnet session failed: {exc.__class__.__name__}: {exc}")
-        ev["error"] = str(exc)
-        save_evidence("camera_shell_inspect", ev)
-        return 1
-
-    ev["commands"] = results
-
-    # --- analysis: who listens on 7679? -------------------------------------
-    proc_tcp = results.get("cat /proc/net/tcp", "")
-    listen_inodes = parse_7679_inodes(proc_tcp)
-    ev["listen_inodes_7679"] = listen_inodes
-    netstat = results.get("netstat -ltnp 2>/dev/null || netstat -ltn", "")
-    ns_7679 = [l for l in netstat.splitlines() if ":7679" in l or ":1E07" in l.upper()]
-    ev["netstat_7679_lines"] = ns_7679
-
-    hr("WHO LISTENS ON 7679 (inside the camera)")
-    if ns_7679:
-        for l in ns_7679:
-            info("  " + l.strip())
+    # 0) channel availability check
+    ping = execute_cgi(args.host, "echo g360-inspect-ok", timeout=8)
+    ev["channel_probe"] = {k: ping.get(k) for k in ("http_status", "output", "error")}
+    channel_ok = ping.get("output") == "g360-inspect-ok"
+    if channel_ok:
+        ok("execute CGI channel alive (echo returned)")
     else:
-        warn("7679 LISTEN not visible in netstat output")
-    # try to map inodes → pid
-    ps_text = results.get("ps", "")
-    ev["ps_lines"] = ps_text.splitlines()[:120]
-    if ps_text:
-        stream_rows = [l for l in ps_text.splitlines()
-                       if re.search(r"stream|video|live|camera|avi|preview|server", l, re.I)]
-        if stream_rows:
-            info("streaming-related processes (from ps):")
-            for l in stream_rows[:15]:
-                info("  " + l.strip())
+        warn(f"execute CGI channel degraded: {ping.get('error') or ping.get('output')!r} "
+             "— will still try the inspection commands")
 
-    # --- §15: internal stream test (localhost:7679 from inside the camera) --
-    hr("INTERNAL STREAM TEST (camera serves itself on localhost:7679)")
-    wget_cmd = ("wget -q -O /tmp/g360_selftest.bin --header='Range: bytes=0-' "
-                "--timeout=6 http://127.0.0.1:7679/livestream_high.avi; "
-                "ls -l /tmp/g360_selftest.bin; head -c 64 /tmp/g360_selftest.bin | od -A x -t x1z | head -4; "
-                "rm -f /tmp/g360_selftest.bin")
-    try:
-        selftest = telnet_session(args.host, args.port, [wget_cmd], timeout=12.0)
-        ev["internal_stream_test"] = selftest.get(wget_cmd, "")
-        out_txt = ev["internal_stream_test"]
-        m = re.search(r"/tmp/g360_selftest\.bin\s+(\d+)", out_txt)
+    # 1) read-only inspection
+    for name, cmd in CMDS.items():
+        r = execute_cgi(args.host, cmd)
+        ev["commands"][name] = r
+        if r.get("error"):
+            fail(f"{name}: {r['error']}")
+            r_fb = telnet_fallback(args.host, cmd)
+            ev["commands"][name + "_telnet_fallback"] = r_fb
+            if r_fb.get("output"):
+                r["output"] = r_fb["output"]
+                warn(f"{name}: recovered via telnet fallback")
+            else:
+                continue
+        head = "\n".join(r.get("output", "").splitlines()[:6])
+        info(f"{name}: {len(r.get('output', ''))} bytes")
+        for line in head.splitlines():
+            info("    " + line[:150])
+
+    # 2) socket-state analysis for the stream port
+    proc_tcp = ev["commands"].get("proc_net_tcp", {}).get("output", "")
+    sockets = parse_7679_rows(proc_tcp)
+    ev["stream_sockets"] = sockets
+    hr(f"SOCKETS ON :{STREAM_PORT} (from /proc/net/tcp)")
+    if not sockets["rows"] and proc_tcp:
+        warn(f"no socket rows on :{STREAM_PORT} (hex {STREAM_PORT_HEX}) — "
+             "streamer not listening at all")
+    for row in sockets["rows"][:12]:
+        info(f"    {row['state']:<12} local={row['local']} remote={row['remote']} "
+             f"inode={row['inode']}")
+    if sockets["listen"]:
+        ok(f"streamer LISTEN confirmed ({len(sockets['listen'])} socket)")
+    if sockets["established"]:
+        warn(f"{len(sockets['established'])} ESTABLISHED stream socket(s) — "
+             "a client currently holds the single session")
+    if sockets["lingering"]:
+        warn(f"{len(sockets['lingering'])} lingering socket(s) "
+             f"(CLOSE_WAIT/TIME_WAIT: {[r['state'] for r in sockets['lingering']]}) "
+             "— dead session may still be pinned")
+
+    # 3) who owns the listener
+    who = ev["commands"].get("who_owns_7679", {}).get("output", "")
+    ps_out = ev["commands"].get("ps", {}).get("output", "")
+    ev["streamer_candidates"] = [
+        line.strip() for line in (who + "\n" + ps_out).splitlines()
+        if re.search(r"stream|video|preview|dnd|gear|avi", line, re.I)][:10]
+    if ev["streamer_candidates"]:
+        hr("STREAMER PROCESS CANDIDATES")
+        for line in ev["streamer_candidates"]:
+            info("    " + line[:160])
+
+    # 4) the decisive internal self-test: does the streamer serve INSIDE?
+    if not args.skip_internal_wget:
+        hr("INTERNAL STREAM SELF-TEST (localhost:7679 from inside the camera)")
+        r = execute_cgi(args.host, INTERNAL_WGET, timeout=20)
+        ev["internal_stream_test"] = r
+        m = re.search(r"g360_selftest\.bin\s+(\d+)", r.get("output", ""))
         if m:
             n = int(m.group(1))
+            ev["internal_stream_bytes"] = n
             if n > 1024:
-                ok(f"INTERNAL stream delivered {n} bytes to localhost → "
-                   "camera-side stream service is ALIVE (problem is not the service)")
-                ev["internal_stream_bytes"] = n
+                ok(f"INTERNAL stream delivered {n} bytes to localhost → the streamer "
+                   "CAN serve; an external wedge is a session/arming state, not a dead service")
             else:
-                fail(f"internal wget got only {n} bytes → camera-side streamer is the suspect")
-                ev["internal_stream_bytes"] = n
+                fail(f"internal wget got only {n} bytes → the streamer itself is wedged "
+                     "internally (process alive, producer dead)")
         else:
-            warn("could not parse internal wget result (busybox wget may lack --header; "
-                 "raw output saved in evidence)")
-    except Exception as exc:
-        warn(f"internal stream test failed: {exc}")
+            warn(f"could not parse internal wget result — raw saved. "
+                 f"({(r.get('output') or r.get('error') or '')[:200]})")
 
+    # 5) verdict
     hr("VERDICT")
-    if listen_inodes or ns_7679:
-        ok("7679 listener confirmed inside the camera (stock service — mod never touches 7679)")
-        ev["verdict"] = "LISTENER_CONFIRMED"
+    if sockets["listen"] and ev.get("internal_stream_bytes", 0) > 1024:
+        ev["verdict"] = "LISTENER_CONFIRMED_INTERNAL_ALIVE"
+        ok("listener + internal delivery confirmed — the wedge is SESSION state "
+           "(arming), not a dead service → session_lifecycle_probe.py decides re-arm")
         ret = 0
+    elif sockets["listen"]:
+        ev["verdict"] = "LISTENER_CONFIRMED_INTERNAL_STALLED"
+        fail("listener exists but internal delivery stalled — streamer producer wedged")
+        ret = 1
     else:
-        warn("could not confirm 7679 listener from inside — save evidence for manual review")
         ev["verdict"] = "LISTENER_UNCONFIRMED"
+        warn("listener not confirmable from inside (command output insufficient)")
         ret = 1
     save_evidence("camera_shell_inspect", ev)
     return ret

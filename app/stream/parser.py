@@ -693,6 +693,22 @@ REQUEST_STYLES = (LIVE_REQUEST_STYLE,)
 # window is added on top of the exponential backoff for zero-byte attempts.
 CAMERA_SETTLE_SECONDS = 2.0
 
+# DECISIVE FIELD EVIDENCE (diagnostics/raw/evidence 2026-09-04 115725/115729/
+# 115733 — run_investigation PHASE 1 vs 2 vs 2d, IDENTICAL request bytes
+# 'Range: bytes=0-' + keep-alive): the SM-R210 streamer is SINGLE-SHOT per
+# arming. Client #1 received 9.2 MB continuously; client #2 (seconds later,
+# same request) received 206 headers and ZERO body; client #3 timed out.
+# Blind retries therefore NEVER recover a headers-without-body wedge — they
+# only hammer a fragile embedded server. After WEDGED_STALL_LIMIT stalled
+# attempts the transport STOPS and surfaces WEDGED_ERROR_MSG so the UI can
+# offer the explicit re-arm action (POST /api/camera/rearm).
+WEDGED_STALL_LIMIT = 3
+WEDGED_ERROR_MSG = (
+    "CAMERA_STREAM_WEDGED: the camera sent headers but no body for "
+    f"{WEDGED_STALL_LIMIT} consecutive attempts — the single-session streamer "
+    "is wedged (serves ONE client per arming). Use Re-arm (POST "
+    "/api/camera/rearm), then Connect; power-cycle if re-arm fails.")
+
 
 def iter_camera_bytes(cfg: dict, stop_event: threading.Event,
                       on_response=None, on_event=None) -> Generator[bytes, None, None]:
@@ -778,13 +794,14 @@ def iter_camera_bytes(cfg: dict, stop_event: threading.Event,
                         attempt, style_name, kind, time.time() - t0, bytes_in_attempt, exc, delay)
             emit(kind, attempt=attempt, style=style_name, error=str(exc),
                  bytes=bytes_in_attempt, retry_in=delay, stalled_total=stalled_attempts)
-            if kind == "stalled" and stalled_attempts == 3:
+            if kind == "stalled" and stalled_attempts == 1:
                 LOG.error(
-                    "STREAM: camera sent headers but never streamed a body in %d attempts. "
-                    "Likely causes: (1) camera streaming session wedged — power-cycle the "
-                    "camera; (2) the phone Gear 360 app still holds the single live-stream "
-                    "session — close it; (3) live preview not armed on the camera.",
-                    stalled_attempts)
+                    "STREAM: camera sent headers but never streamed a body. "
+                    "PROVEN FIELD BEHAVIOUR: the single-session streamer serves "
+                    "ONE client per arming — a previous client disconnected and "
+                    "was not re-armed. Retries up to %d may help marginally; "
+                    "beyond that use Re-arm / power-cycle.", WEDGED_STALL_LIMIT)
+            if kind == "stalled" and stalled_attempts == WEDGED_STALL_LIMIT:
                 emit("stall_persist", attempts=stalled_attempts)
             if kind == "stalled":
                 # zero-byte attempt: the camera may still be holding/releasing
@@ -795,5 +812,11 @@ def iter_camera_bytes(cfg: dict, stop_event: threading.Event,
                          "(single-session server must release the old socket)", settle)
                 if stop_event.wait(settle):
                     return
+            if kind == "stalled" and stalled_attempts >= WEDGED_STALL_LIMIT:
+                # terminal: proven useless to retry — stop the transport so the
+                # manager can surface the wedged state and offer Re-arm
+                LOG.error("STREAM: %s", WEDGED_ERROR_MSG)
+                emit("wedged", attempts=stalled_attempts)
+                return
             if stop_event.wait(delay):
                 return

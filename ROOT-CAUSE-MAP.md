@@ -1,6 +1,6 @@
 # ROOT-CAUSE-MAP — Samsung Gear 360 SM-R210 Live Pipeline
 
-**Build under investigation:** Gear360 Hub @ `171e8bb` → this investigation
+**Build under investigation:** Gear360 Hub @ `863e3ca` → this investigation
 **Camera:** Samsung Gear 360 2017 (SM-R210), firmware `R210GLU0ARB2`, `192.168.43.1:7679`
 **Method:** layered investigation (task doc §1–§53). Evidence Ladder per §41:
 **LEVEL 0 = proven · LEVEL 1 = highly likely · LEVEL 2 = possible · LEVEL 3 = unknown.**
@@ -24,6 +24,9 @@ Nothing in this document may be promoted a level without new evidence.
 | E10 | `codec=2` from the real camera is UNDOCUMENTED (reference maps 0=raw, 1=HEVC); Hub's "2→h264" is an assumption | **LEVEL 1** → `tools/parse_captured_stream.py` + `tools/test_h264_decode.py` decide empirically |
 | E11 | A mid-stream repeated `TTTS` header block is a REAL documented camera behaviour; Hub parser survives it via resync (1 resync + jump to next 00VD), not by the reference's explicit skip | **LEVEL 1** (reference code) — functional, improvement optional |
 | E12 | Take Photo (`st key click s2`) + FTP 21 + HTTP 8888 work independently of the stream | **LEVEL 3** on this unit → `tools/camera_control_probe.py --photo` decides |
+| E13 | **The SM-R210 streamer is SINGLE-SHOT per arming**: client #1 got 9.2 MB continuous (~1.15 MB/s, 8 s, no idle events); client #2 seconds later, IDENTICAL request bytes (`Range: bytes=0-` + keep-alive — verified in both probe sources), got 206 headers and ZERO body (recv_timeout 3 s); client #3 timed out with 0 bytes | **LEVEL 0** (field evidence `20260904_115725_tcp_stream_probe.json` vs `115729_raw_camera_probe.json` vs `115733_raw_camera_stream_dump.json` — sequential PHASE 1→2→2d) |
+| E14 | The PHASE 2b variant matrix of 2026-09-04 ran ZERO variants (`order=[] results=[]`) — orchestrator passed letters `B,A,C,D,E` but the tool filtered on full keys → **"HTTP style dependency? true" in that run's failure tree was an ARTIFACT, not evidence** | **LEVEL 0** (tool bug, fixed inv-2.0: letter aliases accepted) |
+| E15 | Telnet on this unit demands auth (`Password:` / `Login incorrect` — zero commands executed, PHASE 3 verdict LISTENER_UNCONFIRMED meaningless) while **8888 `/cgi-bin/execute?rawcmd=` executes commands and returns output** (`echo g360probe-ok` → output echoed) | **LEVEL 0** (`20260904_115759_camera_shell_inspect.json` vs `20260904_115759_camera_control_probe.json`) |
 
 ---
 
@@ -32,10 +35,10 @@ Nothing in this document may be promoted a level without new evidence.
 | Layer | Test (tool / code) | Evidence | Result | Confidence | Root-cause candidate? |
 |---|---|---|---|---|---|
 | L0 Physical camera state | `camera_control_probe.py`, user visual | camera powers, Wi-Fi up (E1) | OK | LEVEL 0 | no |
-| L1 Firmware services | `camera_shell_inspect.py` (ps/netstat), vendor analysis E9 | 7679 listener = stock; mod adds 23/21/8888 only | pending field run | LEVEL 1 | no |
+| L1 Firmware services | `camera_shell_inspect.py` (inv-2.0: 8888 exec-CGI primary — E15) | 7679 listener = stock; mod adds 23/21/8888 only; telnet auth-gated on this unit | pending field run (new channel) | LEVEL 1 | no |
 | L2 Wi-Fi/IP/TCP | `tcp_stream_probe.py` | E1: TCP OK | OK | LEVEL 0 | no |
-| L3 HTTP streaming endpoint | `http_variants_probe.py` (ISOLATED) | E1: 206 OK; E5 needs re-proof in isolation | **unresolved: which request styles really work** | LEVEL 1 | **RC-1** |
-| L4 Raw byte stream | `raw_camera_probe.py`, `raw_camera_stream_dump.py` | E3: previous evidence capped at 64 KiB; E4 unknown | **unresolved: continuity beyond 64 KiB** | LEVEL 3 | **RC-2** |
+| L3 HTTP streaming endpoint | `http_variants_probe.py` (ISOLATED, letters fixed) | E13: request style is NOT the variable — client #1 streamed 9.2 MB with the same bytes client #2 starved on | **session-lifecycle semantics, not style** | LEVEL 0 | **RC-6 (root)** |
+| L4 Raw byte stream | `raw_camera_probe.py`, `raw_camera_stream_dump.py` | E13: 9.2 MB in 8 s continuous → E4 PROVEN | **continuity PROVEN (first client)** | LEVEL 0 | no |
 | L5 Container/protocol | `parse_captured_stream.py` (offline) | E2: structure present and consistent with Extractor.kt | OK (structure) | LEVEL 0 | no |
 | L6 Chunk/AU extraction | `parse_captured_stream.py` | parser fixed+verified (0 resyncs, self-inclusive sizes, size−5 payload) | OK | LEVEL 0 | no |
 | L7 H264 validation | `test_h264_decode.py` + ffprobe on real AUs | codec=2 undocumented (E10) | **unresolved: true codec of this unit** | LEVEL 1 | **RC-3** |
@@ -50,14 +53,21 @@ Nothing in this document may be promoted a level without new evidence.
 
 ## 2. Root-cause candidates (ranked)
 
+### RC-6 — SINGLE-SHOT STREAMER: one arming serves ONE client; no re-arm afterwards (THE root cause of the freeze) — **ROOT CAUSE, LEVEL 0**
+- **Evidence E13 (LEVEL 0):** sequential PHASE 1→2→2d with IDENTICAL request bytes: client #1 → 9.2 MB continuous; client #2 → 206 + zero body; client #3 → timeout. The ONLY variable is connection history.
+- **Mechanism (E8):** the stock phone app arms live preview over Bluetooth BEFORE each stream session; one arming = one serving window. After the client disconnects the streamer stays disarmed; new HTTP clients receive a canned 206 header block from the alive HTTP front-end while the body producer never attaches.
+- **Why the Hub froze (user symptom):** any transport interruption → `iter_camera_bytes` re-connected blindly → every reconnect after a session end is a starving client #2 → endless headers-without-body → the UI froze on the last frame and the camera stayed wedged until power-cycle. Worse, `restart_stream()` itself disconnected the (serving) session and reconnected — starved by the same mechanism.
+- **Decides:** `tools/session_lifecycle_probe.py` (self-heal schedule, concurrency first-wins/newest-wins, re-arm ladder incl. 8888 candidates + optional streamer kill).
+- **Hub-side fix shipped (inv-2.0):** transport STOPS after `WEDGED_STALL_LIMIT` (=3) header-only attempts and surfaces `CAMERA_STREAM_WEDGED`; `POST /api/camera/rearm[?apply=true]` runs the 8888 re-arm ladder then reconnects; `restart_stream()` runs the safe re-arm ladder before reconnecting; UI shows a WEDGED badge + Re-arm button.
+
 ### RC-1 — "Request-style" knowledge is incomplete; the variant matrix conclusion may be an ordering artifact
-- **Confidence: LEVEL 1.**
+- **STATUS (E14, LEVEL 0): RESOLVED AS ARTIFACT** — the 2026-09-04 matrix ran ZERO variants (letter/key mismatch, tool bug fixed inv-1.1). E13 proves style is NOT the variable: client #1 streamed with the same bytes client #2 starved on. No style ever recovers a disarmed streamer; the range-style live transport stays (harmless).
 - The live transport was locked to `Range: bytes=0-` after one report; but that matrix ran variants SEQUENTIALLY on a single-session server (F4). Once the first (range) request wedged/kept the session, the later "plain"/"close" attempts were doomed regardless of style.
 - **Decides:** `tools/http_variants_probe.py` (isolated connections + settle gaps + reversed/repeated order).
 - Note: the legacy Android reader sends **plain GET, HTTP/1.1, Keep-Alive, no Range** (`MediaExtractor.java:118`) — if plain truly always stalled, the reference app could never work. This is strong circumstantial evidence that style-dependence is session-order, not style.
 
 ### RC-2 — Camera streams an initial burst (header + first frame(s)) then stalls without the Bluetooth "liveview" arming
-- **Confidence: LEVEL 2.**
+- **STATUS: CONFIRMED AS THE MECHANISM BEHIND RC-6** (E8 vendor + E13 field, LEVEL 0). One arming = one serving window; the app re-arms per session. Remaining question: WHICH non-Bluetooth re-arm works — `tools/session_lifecycle_probe.py` ST3 decides (root/echo/ps/internal-wget/kill).
 - Vendor proof E8: the app sends the BT `cmd-req`/`liveview` message BEFORE `GET /livestream_high.avi`; no HTTP arming exists. If the 64 KiB reading was real camera behaviour (it was NOT — E3 proves it was a probe cap), this would be the mechanism.
 - Counter-evidence: the probe DID receive real container bytes incl. 00VD chunks — so some stream flows without BT arming. Open question is only **continuity** (E4).
 - **Decides:** `tools/raw_camera_stream_dump.py --seconds 30` (continuity + milestones), `tools/camera_shell_inspect.py` (internal localhost:7679 test), then PHASE 3 evidence.
@@ -88,13 +98,12 @@ NO LIVE VIDEO
 │
 ├── HTTP endpoint unavailable? ......... NO (E1: 206 + content-type, LEVEL 0)
 │
-├── HTTP body unavailable? ............. ?
-│     └── previously "65536 then stop" = PROBE CAP artifact (E3, LEVEL 0)
-│         real continuity untested (E4) → tools/raw_camera_stream_dump.py
+├── HTTP body unavailable? ............. YES after first client (E13, LEVEL 0)
+│     └── first client: 9.2 MB continuous (continuity PROVEN — E4 resolved)
+│         clients #2+: 206 headers + ZERO body → single-shot streamer (RC-6)
 │
-├── HTTP style dependency? ............. ? (RC-1)
-│     └── old conclusion = ordering-artifact suspect (F4)
-│         → tools/http_variants_probe.py (isolated)
+├── HTTP style dependency? ............. NO (RC-1 resolved as artifact E14)
+│     └── matrix tool bug fixed (letters); style is NOT the variable (E13)
 │
 ├── Parser fails? ...................... NO (E2 + verified parser, LEVEL 0)
 │     └── mid-stream TTTS re-header: handled via resync (E11)
@@ -123,7 +132,8 @@ NO LIVE VIDEO
 1. `python tools/tcp_stream_probe.py --seconds 8`
 2. `python tools/raw_camera_probe.py --seconds 15`
 3. `python tools/raw_camera_stream_dump.py --seconds 30 --mb 8`   ← **answers E4**
-4. `python tools/http_variants_probe.py --order B,A,C,D,E --repeat 2`  ← **answers RC-1**
+4. `python tools/http_variants_probe.py --order B,A,C,D,E --repeat 2`  ← RC-1 (resolved E14)
+4b. `python tools/session_lifecycle_probe.py --apply`  ← **answers RC-6: self-heal / steal / re-arm winner**
 5. `python tools/camera_shell_inspect.py`   ← who owns 7679, internal stream test
 6. `python tools/camera_control_probe.py --photo`  ← control plane + real photo
 7. `python tools/parse_captured_stream.py diagnostics/raw/dump_*.bin --extract 8 --save-aus`
@@ -145,6 +155,14 @@ and `INVESTIGATION-REPORT.md` from that evidence — never from intuition.)
 | Independent Camera Test endpoint + button | `/api/diagnostics/independent-test`, UI Diagnostics tab | §47 |
 | Capture + Analyze Offline endpoint + button | `/api/diagnostics/captures/analyze`, UI Diagnostics tab | §48 |
 | 8 independent field tools + orchestrator | `tools/` | §3–§8, §12–§18, §20–§28, §39–§40 |
+| Blind reconnect STOP: terminal WEDGED after 3 header-only attempts | `app/stream/parser.py` (WEDGED_STALL_LIMIT/WEDGED_ERROR_MSG), `app/media/decoder.py` | E13/RC-6 (blind retries proven useless) |
+| Re-arm ladder via 8888 exec-CGI (safe S1-S3 + invasive S4 kill) | `app/camera/rearm.py` (new) | E15 (exec CGI proven), RC-6 |
+| `POST /api/camera/rearm[?apply=true]` + auto reconnect | `app/api/camera_api.py`, `manager.rearm_and_connect()` | RC-6 recovery path |
+| restart_stream() re-arms BEFORE reconnecting | `app/camera/manager.py::restart_stream` | RC-6 (restart itself starved) |
+| WEDGED badge + Re-arm button (AR/EN) | `frontend/js/views/camera.js`, `api.js`, `i18n.js` | user freeze symptom |
+| Variant matrix letter aliases (letters now valid order) | `tools/http_variants_probe.py` | E14 tool bug |
+| PHASE 3 switched to 8888 exec-CGI (telnet fallback) | `tools/camera_shell_inspect.py` (inv-2.0) | E15 |
+| Session-lifecycle decisive probe (self-heal/steal/re-arm) | `tools/session_lifecycle_probe.py` (new) + PHASE 2c in orchestrator | RC-6 next decisive run |
 | Vendor references cloned for study | `vendor/gear360_modding/`, `vendor/Gear360App/` | §10, §11, §29–§30 |
 
 ## 6. Camera-side (mod) changes

@@ -48,11 +48,29 @@ def camera_test():
 @router.post("/camera/restart")
 def camera_restart():
     """Restart Live Stream: fresh HTTP session → fresh parser → fresh decoder.
-    Waits for the first frame; never reuses the old session's parser state."""
+    Waits for the first frame; never reuses the old session's parser state.
+    Runs the SAFE re-arm ladder first (evidence 2026-09-04: after a client
+    disconnects the camera answers new clients with headers-but-no-body)."""
     hub = get_hub()
     info = hub.camera.restart_stream()
     hub.apply_mode()
     return info
+
+
+@router.post("/camera/rearm")
+def camera_rearm(apply: bool = False):
+    """Wedged-streamer recovery for the PROVEN single-shot streamer.
+
+    The SM-R210 streamer serves ONE client per arming; after that client
+    disconnects, new clients get headers-without-body forever (field evidence
+    diagnostics/raw/evidence 2026-09-04). This endpoint runs the re-arm ladder
+    via the mod's 8888 execute-CGI (safe root/echo/ps; + streamer-kill when
+    apply=true) and immediately reconnects — the live body is the proof.
+    """
+    hub = get_hub()
+    out = hub.camera.rearm_and_connect(apply=apply)
+    hub.apply_mode()
+    return out
 
 
 @router.post("/camera/photo")

@@ -30,7 +30,8 @@ PHASES = [
     ("PHASE 2", "Raw probe + continuity proof", [sys.executable, "tools/raw_camera_probe.py", "--seconds", "15", "--save-mb", "0.25"]),
     ("PHASE 2d", "Raw stream dump (input for offline phases)", [sys.executable, "tools/raw_camera_stream_dump.py", "--seconds", "12", "--mb", "4"]),
     ("PHASE 2b", "Isolated HTTP variant matrix", [sys.executable, "tools/http_variants_probe.py", "--order", "B,A,C,D,E", "--settle", "3"]),
-    ("PHASE 3", "Camera-side inspection (telnet)", [sys.executable, "tools/camera_shell_inspect.py"]),
+    ("PHASE 2c", "Session lifecycle (single-shot streamer + re-arm)", [sys.executable, "tools/session_lifecycle_probe.py", "--seconds", "5"]),
+    ("PHASE 3", "Camera-side inspection (8888 exec-CGI)", [sys.executable, "tools/camera_shell_inspect.py"]),
     ("PHASE 4", "Camera control probe (23/21/8888)", [sys.executable, "tools/camera_control_probe.py"]),
     ("PHASE 5-7", "Offline container parse + H264 validation", [sys.executable, "tools/parse_captured_stream.py"]),
     ("PHASE 8", "Independent FFmpeg decode (real bytes)", [sys.executable, "tools/test_h264_decode.py"]),
@@ -63,7 +64,7 @@ def main() -> int:
     for key, title, cmd in PHASES:
         if only and key not in only:
             continue
-        stream_phase = key in ("PHASE 1", "PHASE 2", "PHASE 2d", "PHASE 2b")
+        stream_phase = key in ("PHASE 1", "PHASE 2", "PHASE 2d", "PHASE 2b", "PHASE 2c")
         if stream_phase and (args.skip_stream or lock["live_session"]):
             reason = "skipped-stream" if args.skip_stream else "skipped-live-session"
             results[key] = {"status": reason, "title": title}

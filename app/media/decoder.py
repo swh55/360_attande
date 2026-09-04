@@ -207,10 +207,11 @@ class StreamPipeline:
         self.connect_wall = 0.0
         self.decoder_block_reason: Optional[str] = None
         # transport observability (fed by iter_camera_bytes on_event)
-        self.transport_status = "idle"   # idle|connecting|headers|data|stalled|error
+        self.transport_status = "idle"   # idle|connecting|headers|data|stalled|error|wedged
         self.last_transport_event: dict = {}
         self.stall_events = 0
         self.stalled_attempts_total = 0
+        self.wedged_events = 0
         self.transport_retries = 0
         self.reconnects = 0
         self.last_transport_error = ""
@@ -382,6 +383,14 @@ class StreamPipeline:
         elif etype == "stall_persist":
             LOG.error("TRANSPORT: persistent headers-without-body (attempts=%s) — see earlier guidance",
                       detail.get("attempts"))
+        elif etype == "wedged":
+            # terminal state (proven single-shot streamer): the transport gave
+            # up after WEDGED_STALL_LIMIT header-only attempts; the pipeline
+            # thread will exit and _run() surfaces WEDGED_ERROR_MSG
+            self.transport_status = "wedged"
+            self.wedged_events += 1
+            LOG.error("TRANSPORT: camera streamer WEDGED after %s header-only attempts",
+                      detail.get("attempts"))
 
     def _run(self) -> None:
         from ..stream.parser import Gear360ChunkParser, iter_camera_bytes
@@ -473,3 +482,11 @@ class StreamPipeline:
         except Exception as exc:
             self.error = str(exc)
             LOG.exception("Stream pipeline failed")
+        finally:
+            # terminal wedged state: the transport gave up on purpose (proven
+            # single-shot streamer — blind retries never recover it). Surface
+            # the explicit WEDGED error so the manager/UI can offer Re-arm.
+            if self.error is None and self.transport_status == "wedged":
+                from ..stream.parser import WEDGED_ERROR_MSG
+                self.error = WEDGED_ERROR_MSG
+                LOG.error("STREAM: pipeline ended — %s", WEDGED_ERROR_MSG)

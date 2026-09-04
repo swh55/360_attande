@@ -18,6 +18,7 @@ from ..core import settings as settings_svc
 from ..media.decoder import StreamPipeline
 from ..media.ffmpeg import locate
 from ..media.framebus import FrameBus
+from . import rearm as rearm_svc
 from .session_broker import get_broker
 
 LOG = get("camera")
@@ -42,6 +43,7 @@ class CameraManager:
         self.last_latency_ms: Optional[float] = None
         self.last_probe_at = 0.0
         self.camera_reachable = False
+        self._last_rearm: dict | None = None
 
     # ---- info ---------------------------------------------------------------
     def layers(self) -> dict:
@@ -112,6 +114,8 @@ class CameraManager:
             "error_count": self.error_count,
             "reconnects": self.reconnects,
             "error": self.error,
+            "wedged": bool(self.error and "CAMERA_STREAM_WEDGED" in str(self.error)),
+            "last_rearm": self._last_rearm,
             "stream": parser_info,
         }
 
@@ -208,8 +212,16 @@ class CameraManager:
 
     def restart_stream(self) -> dict:
         """Restart Live Stream: stop old session, close response, terminate
-        decoder, drop the stale latest frame, then start a FRESH session
-        (HTTP #2 → Parser #2 → Decoder #2) and wait for the first frame."""
+        decoder, drop the stale latest frame, RE-ARM the camera's single-shot
+        streamer, then start a FRESH session (HTTP #2 → Parser #2 → Decoder #2)
+        and wait for the first frame.
+
+        Field evidence (diagnostics/raw/evidence 2026-09-04): after a client
+        disconnects, the camera answers new requests with headers-but-no-body
+        until it is re-armed — a plain reconnect produces exactly the reported
+        freeze. The safe re-arm ladder (8888 root/echo/ps) runs here; the
+        invasive kill stays behind the explicit /api/camera/rearm?apply=1.
+        """
         LOG.info("RESTART: stopping current live stream (if any) …")
         with self._lock:
             if self._pipeline is not None:
@@ -221,9 +233,39 @@ class CameraManager:
         # stale frame must never masquerade as a live one after restart
         self.bus.clear()
         time.sleep(0.5)   # camera settle: single-session server releases the socket
+        try:
+            self._last_rearm = rearm_svc.rearm(apply=False)
+            if self._last_rearm.get("applied"):
+                LOG.info("RESTART: safe re-arm actions executed before reconnect")
+        except Exception as exc:                       # re-arm must never block restart
+            LOG.warning("RESTART: safe re-arm failed (%s) — reconnecting anyway", exc)
+            self._last_rearm = {"error": str(exc)}
         LOG.info("RESTART: starting fresh live stream session")
         out = self.connect()
+        out["rearm"] = self._last_rearm
         event_bus.publish("camera_state", {"state": "restarting"})
+        return out
+
+    def rearm_and_connect(self, apply: bool = False) -> dict:
+        """Explicit wedged-recovery: run the re-arm ladder (safe, or invasive
+        kill with apply=True), then immediately reconnect the real client —
+        the ONLY proof of a successful arming is a live connection that
+        actually streams a body."""
+        with self._lock:
+            if self._pipeline is not None:
+                self._pipeline.stop()
+                self._pipeline = None
+            self.state = "disconnected"
+            self._stop_state.set()
+            get_broker().release("live")
+        self.bus.clear()
+        self._last_rearm = rearm_svc.rearm(apply=apply)
+        LOG.info("REARM: apply=%s applied=%s listener_after=%s",
+                 apply, self._last_rearm.get("applied"),
+                 self._last_rearm.get("listener_after"))
+        time.sleep(0.5)
+        out = self.connect()
+        out["rearm"] = self._last_rearm
         return out
 
     def test_connection(self) -> dict:

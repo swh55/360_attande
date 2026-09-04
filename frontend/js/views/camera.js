@@ -16,6 +16,7 @@ export async function renderCamera(container) {
           <button class="btn primary" id="btnConnect">🔗 ${t("cam.connect")}</button>
           <button class="btn" id="btnDisconnect">⛔ ${t("cam.disconnect")}</button>
           <button class="btn" id="btnRestart">🔄 ${t("cam.restart")}</button>
+          <button class="btn warn" id="btnRearm" ${cam.wedged ? "" : "hidden"}>🔧 ${t("cam.rearm")}</button>
           <button class="btn accent" id="btnPhoto">📸 ${t("cam.take_photo")}</button>
           <button class="btn" id="btnTest">🧪 ${t("cam.test")}</button>
         </div>
@@ -58,11 +59,11 @@ export async function renderCamera(container) {
   </div>`;
 
   const stateBadge = container.querySelector("#camStateBadge");
-  const setState = (s, demo) => {
+  const setState = (s, demo, wedged) => {
     stateBadge.innerHTML = `<span class="badge ${s === "streaming" ? "ok" : s === "error" ? "err" : s === "disconnected" || demo ? "muted" : "warn"}">
-      ${demo ? t("state.demo") : t("state." + s, s)}</span>`;
+      ${demo ? t("state.demo") : wedged ? t("state.wedged") : t("state." + s, s)}</span>`;
   };
-  setState(cam.state, false);
+  setState(cam.state, false, cam.wedged);
 
   const phaseEl = container.querySelector("#camPhase");
   const setPhase = (ph) => { if (ph) phaseEl.textContent = ph; };
@@ -81,6 +82,18 @@ export async function renderCamera(container) {
       await api.restartCam();
       toast("🔄 ✓ " + t("cam.restart_ok"), "ok");
     } catch (err) { toast(err.message, "err"); }
+  };
+  btnRearm.onclick = async () => {
+    btnRearm.disabled = true;
+    toast("🔧 " + t("cam.rearm_running"), "ok");
+    try {
+      const r = await api.rearmCam(true);   // invasive kill included — explicit user action
+      const ra = r.rearm || {};
+      const okActions = (ra.actions || []).filter((a) => a.ok).length;
+      toast(`🔧 ${t("cam.rearm_ok")} (${okActions}/${(ra.actions || []).length})`, "ok");
+    } catch (err) {
+      toast("🔧 " + t("cam.rearm_fail") + " — " + err.message, "err");
+    } finally { btnRearm.disabled = false; }
   };
   container.querySelector("#btnPhoto").onclick = async () => {
     const btn = container.querySelector("#btnPhoto");
@@ -135,7 +148,7 @@ export async function renderCamera(container) {
   // live updates
   const unsub = feed.on("state", (msg) => {
     const cam2 = msg.camera || {};
-    setState(cam2.state, msg.mode === "demo");
+    setState(cam2.state, msg.mode === "demo", cam2.wedged);
     setPhase(cam2.phase);
     renderCounters(msg.counters);
     container.querySelector("#camReach").textContent =
