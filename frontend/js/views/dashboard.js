@@ -1,126 +1,94 @@
-// Dashboard view: camera status, live preview, activity, storage, health, recent events.
-import { t, fmt } from "../i18n.js";
-import { api, feed } from "../api.js";
-import { el, toast, state } from "../app.js";
-import { GL360, attachInteraction } from "../gl360.js";
+// Dashboard — camera status hero + control services + main actions (§30).
+import { t } from "../i18n.js";
+import { api } from "../api.js";
+import { el, toast, setStatePill } from "../app.js";
 
 export async function renderDashboard(container) {
-  const [cam, stats, today, health, events] = await Promise.all([
-    api.camStatus(), api.galleryStats(), api.eventsToday(),
-    api.health(), api.events("?limit=6"),
-  ]);
-
   container.innerHTML = `
-  <div class="grid cols-2" style="grid-template-columns: 2fr 1fr;">
-    <div class="card" style="padding:0; overflow:hidden;">
-      <div class="viewer-wrap" id="dashViewer" style="border-radius:12px; min-height:380px;">
-        <canvas id="dashCanvas"></canvas>
-        <div class="viewer-tag" id="dashTag"></div>
-        <div class="viewer-ctl">
-          <button class="vbtn" id="dashOpen">◉ ${t("dash.open_live")}</button>
-        </div>
-      </div>
-    </div>
-    <div style="display:flex; flex-direction:column; gap:16px;">
-      <div class="card">
-        <h3>📷 ${t("dash.camera")}</h3>
-        <div class="kv"><span>${t("common.state")}</span><b id="dashState">—</b></div>
-        <div class="kv"><span>${t("cam.ip")}</span><b>${cam.config?.host || "—"}</b></div>
-        <div class="kv"><span>${t("cam.stream_url")}</span><b style="font-size:11px">${cam.stream_url}</b></div>
-        <div class="kv"><span>FPS</span><b id="dashFps">—</b></div>
-        <div class="kv"><span>${t("cam.codec")}</span><b>${cam.stream?.codec || "—"}</b></div>
-      </div>
-      <div class="card">
-        <h3>✦ ${t("dash.activity")}</h3>
-        <div class="grid cols-2" style="gap:10px">
-          <div class="kpi"><span class="num" id="kpiPersons">${fmt.num(0)}</span><span class="lbl">${t("dash.people_detected")}</span></div>
-          <div class="kpi"><span class="num" id="kpiFaces">${fmt.num(0)}</span><span class="lbl">${t("dash.faces_detected")}</span></div>
-          <div class="kpi"><span class="num" id="kpiKnown">${fmt.num(today.known || 0)}</span><span class="lbl">${t("dash.known")}</span></div>
-          <div class="kpi"><span class="num" id="kpiUnknown">${fmt.num(today.unknown || 0)}</span><span class="lbl">${t("dash.unknown")}</span></div>
-        </div>
-      </div>
+  <div class="card hero" id="hero">
+    <div class="cam-state"><span class="dot"></span><span id="heroState">${t("common.loading")}</span></div>
+    <div class="ip" id="heroIp">—</div>
+    <div class="svc-grid" id="svcGrid"></div>
+    <div class="actions">
+      <button class="btn primary" id="btnPhoto">📸 ${t("dash.take_photo")}</button>
+      <button class="btn" id="btnWeb">🌐 ${t("dash.open_web")}</button>
+      <button class="btn" id="btnFiles">🗂 ${t("dash.files")}</button>
+      <button class="btn" id="btnTest">🧪 ${t("dash.test")}</button>
     </div>
   </div>
-
-  <div class="grid cols-3" style="margin-top:16px">
-    <div class="card">
-      <h3>▦ ${t("dash.storage")}</h3>
-      <div class="grid cols-2" style="gap:10px">
-        <div class="kpi"><span class="num">${fmt.num(stats.today.videos)}</span><span class="lbl">${t("dash.videos_today")}</span></div>
-        <div class="kpi"><span class="num">${fmt.num(stats.today.photos)}</span><span class="lbl">${t("dash.photos_today")}</span></div>
-        <div class="kpi"><span class="num">${fmt.num(stats.today.events)}</span><span class="lbl">${t("dash.events_today")}</span></div>
-        <div class="kpi"><span class="num">${fmt.bytes(stats.today.storage_bytes)}</span><span class="lbl">${t("dash.storage_today")}</span></div>
-      </div>
-    </div>
-    <div class="card">
-      <h3>❤ ${t("dash.health")}</h3>
-      <div id="dashHealth"></div>
-    </div>
-    <div class="card">
-      <h3>≡ ${t("dash.recent")}</h3>
-      <div id="dashRecent" style="max-height:230px; overflow-y:auto"></div>
-    </div>
+  <div class="card" id="testCard" hidden>
+    <h3>🧪 ${t("test.title")}</h3>
+    <p class="sub">${t("test.note")}</p>
+    <div id="testBody"></div>
   </div>`;
 
-  // ---- health list ----
-  const healthBox = container.querySelector("#dashHealth");
-  const labels = { camera: t("dash.camera"), stream: "Stream", decoder: "Decoder",
-    ffmpeg: "FFmpeg", ai: t("nav.ai"), storage: t("dash.storage"), database: "DB" };
-  healthBox.innerHTML = Object.entries(health)
-    .filter(([k]) => k !== "frame_age")
-    .map(([k, v]) => `<div class="health-item"><span class="hdot ${v.status}"></span>
-      <span>${labels[k] || k}</span><span class="d">${v.detail || ""}</span></div>`).join("");
+  const svcRow = (name, key, port, ok, latency) => `
+    <div class="svc ${ok ? "ok" : "err"}">
+      <div><div class="svc-name">${t(key)}</div><div class="svc-port">${port}</div></div>
+      <div class="svc-mark">${ok ? "✓" : "✕"}</div>
+    </div>`;
 
-  // ---- recent events ----
-  const recent = container.querySelector("#dashRecent");
-  if (!events.events.length) {
-    recent.innerHTML = `<div style="color:var(--text-2)">${t("ev.empty")}</div>`;
-  } else {
-    for (const ev of events.events) {
-      recent.appendChild(el(`<div class="tl-event">
-        <span class="time">${fmt.time(ev.ts)}</span>
-        <div class="body"><div class="m">${t("ev.type." + ev.type, ev.type)}</div>
-        <div class="x">${ev.message || ""}</div></div></div>`));
+  async function refresh() {
+    try {
+      const st = await api.status();
+      setStatePill(st.state);
+      const hero = container.querySelector("#hero");
+      hero.className = `card hero ${st.state === "CONTROL_READY" ? "ok" : st.state === "REACHABLE" ? "warn" : "err"}`;
+      container.querySelector("#heroState").textContent = t("state." + st.state, st.state);
+      container.querySelector("#heroIp").textContent =
+        `${t("cam.ip")}: ${st.host} · ${st.camera_web_url}`;
+      const s = st.services;
+      container.querySelector("#svcGrid").innerHTML =
+        svcRow("http", "svc.http", `HTTP ${s.http.port}`, s.http.ok, s.http.latency_ms) +
+        svcRow("ftp", "svc.ftp", `FTP ${s.ftp.port}`, s.ftp.ok, s.ftp.latency_ms) +
+        svcRow("telnet", "svc.telnet", `Telnet ${s.telnet.port}`, s.telnet.ok, s.telnet.latency_ms);
+      return st;
+    } catch (err) {
+      setStatePill("OFFLINE");
+      const hero = container.querySelector("#hero");
+      hero.className = "card hero err";
+      container.querySelector("#heroState").textContent = t("cam.offline");
+      container.querySelector("#svcGrid").innerHTML = "";
+      return null;
     }
   }
 
-  // ---- mini live viewer ----
-  const canvas = container.querySelector("#dashCanvas");
-  const tag = container.querySelector("#dashTag");
-  let gl = null, img = null, raf = 0, cleanupWS = () => {};
-  try {
-    gl = new GL360(canvas);
-    img = new Image();
-    img.src = "/api/mjpeg?w=960";
-    img.addEventListener("load", () => gl.markStale());
-    gl.setSource(img);
-    gl.setMode("fisheye");
-    attachInteraction(gl, canvas);
-    const loop = () => { gl.render(); raf = requestAnimationFrame(loop); };
-    loop();
-    cleanupWS = feed.on("state", (msg) => {
-      tag.hidden = false;
-      const demo = msg.mode === "demo";
-      tag.className = `viewer-tag ${demo ? "demo" : ""}`;
-      tag.textContent = demo ? "DEMO MODE" : `${t("state." + msg.mode, msg.mode)}`;
-      container.querySelector("#dashFps").textContent = fmt.num(Math.round(msg.stream?.fps || 0));
-      const st = msg.camera?.state;
-      container.querySelector("#dashState").textContent = demo ? t("state.demo") : t("state." + st, st);
-      const c = msg.ai?.counts;
-      if (c) {
-        container.querySelector("#kpiPersons").textContent = fmt.num(c.persons);
-        container.querySelector("#kpiFaces").textContent = fmt.num(c.faces);
-      }
-    });
-  } catch (err) {
-    toast("WebGL: " + err.message, "err");
-  }
-  container.querySelector("#dashOpen").onclick = () => { location.hash = "#/live"; };
-
-  return () => {
-    cancelAnimationFrame(raf);
-    cleanupWS();
-    gl?.destroy();
-    img?.remove();
+  container.querySelector("#btnPhoto").onclick = () => { location.hash = "#/photo"; };
+  container.querySelector("#btnFiles").onclick = () => { location.hash = "#/files"; };
+  container.querySelector("#btnWeb").onclick = async () => {
+    try {
+      const w = await api.cameraWeb();
+      window.open(w.url, "_blank", "noopener");
+    } catch (err) { toast(err.message, "err"); }
   };
+  container.querySelector("#btnTest").onclick = async () => {
+    const card = container.querySelector("#testCard");
+    const body = container.querySelector("#testBody");
+    card.hidden = false;
+    body.innerHTML = `<div class="empty">${t("test.running")}</div>`;
+    try {
+      const r = await api.test();
+      const row = (label, r2) => `
+        <div class="svc ${r2.ok ? "ok" : "err"}">
+          <div><div class="svc-name">${label}</div>
+            <div class="svc-port">${r2.ok ? (t("test.latency") + ": " + (r2.latency_ms ?? "—") + " ms")
+              : (r2.error || "").slice(0, 90)}</div></div>
+          <div class="svc-mark">${r2.ok ? "✓" : "✕"}</div>
+        </div>`;
+      body.innerHTML = `
+        <div class="svc-grid">
+          ${row(t("svc.http"), r.http)}
+          ${row(t("svc.ftp"), r.ftp)}
+          ${row(t("svc.telnet"), r.telnet)}
+        </div>
+        <p class="sub">${r.http.ok ? "✓ " + t("test.ok_all") : "✕ " + t("test.http_down")}</p>`;
+    } catch (err) {
+      body.innerHTML = `<div class="empty">✕ ${err.message}</div>`;
+    }
+    refresh();
+  };
+
+  await refresh();
+  const timer = setInterval(refresh, 8000);
+  return () => clearInterval(timer);
 }

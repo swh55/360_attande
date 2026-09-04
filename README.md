@@ -1,335 +1,159 @@
-# Gear360 Hub
+# Gear360 Hub — Stable Edition
 
-**Smart Open Platform for Samsung Gear 360 (2017 — SM-R210)**
+**برنامج بسيط ومستقر لإدارة Samsung Gear 360 2017 (SM-R210) عبر مستوى التحكم فقط.**
 
-Gear360 Hub revives the Samsung Gear 360 2017 as a modern, offline-first smart
-camera platform: live 360° viewing, recording, a media gallery, an event
-timeline, and a modular AI engine (motion / person / face / recognition /
-tracking / smart framing / optional attendance) — all running locally on
-Windows with **no cloud and no internet required**.
+> **هذا الإصدار لا يعتمد على Live Preview (منفذ 7679) إطلاقاً.**
+> لا يوجد بث مباشر، ولا AI، ولا FFmpeg، ولا أي اتصال على 7679.
 
-```text
-Gear 360 (SM-R210)  --Wi-Fi-->  Gear360 Hub  -->  Live 360 Viewer
-                                              -->  Recording + Gallery
-                                              -->  Events + AI Modules
+```
+Gear360 Camera (SM-R210)
+       │
+       │ Wi-Fi
+       ▼
+Gear360 Hub Stable        (localhost)
+       │
+       ├── Camera Status        حالة الكاميرا والخدمات
+       ├── Open Camera Web      فتح واجهة الكاميرا (8888)
+       ├── Take Photo           التقاط صورة حقيقي + تحقق FTP
+       ├── FTP Media            تصفح بطاقة SD (DCIM)
+       └── Local Gallery        معرض محلي للملفات المنزّلة
 ```
 
----
+## ما الذي يعمل حالياً
 
-## 1. Supported camera
-
-| | |
-|---|---|
-| Device | Samsung Gear 360 2017 Edition — **SM-R210** |
-| Verified firmware | `R210GLU0ARB2` |
-| Connection | Camera Wi-Fi AP (`Gear 360(02F4)`), camera IP `192.168.43.1` |
-| Live preview | `http://192.168.43.1:7679/livestream_high.avi` |
-| Response | `HTTP 206 Partial Content`, `Content-Type: video/x-avi` |
-
-The preview endpoint is **not** a normal AVI file. It is a custom chunked
-container (`TTTS` / `VID0` / `AUD0` / `VR00` / `LIST` / `movi` / `00VD` /
-`00AU` / `00VR`) carrying HEVC/H.264 access units. Gear360 Hub implements a
-dedicated parser for it (based on the public `TecCheck/Gear360App` extractor
-logic, reimplemented cleanly for a threaded server pipeline).
-
-Camera support is profile-based (`config/camera_profiles.json`): SM-R210 is
-bundled; future devices can be added without touching the core.
-
----
-
-## 2. Architecture
-
-```text
-Gear360 Hub
-├── Camera Layer    app/camera/    state machine, health probe, latency, profiles
-├── Stream Layer    app/stream/    HTTP reader + Gear360 chunk parser (atomic)
-├── Media Layer     app/media/     FFmpeg locator/decoder, bounded FrameBus,
-│                                  recorder, snapshots, 360 projections
-├── 360 Engine      app/media/projections.py + frontend/js/gl360.js
-│                                  dual-fisheye -> equirect/perspective/fisheye/
-│                                  tiny-planet, virtual cameras, AI director
-├── AI Engine       app/ai/        motion, person (OpenCV HOG / YOLO-ready),
-│                                  face detection, face recognition (optional),
-│                                  centroid tracking, rule-based director,
-│                                  smart attendance module
-├── Event Engine    app/events/    timeline events with snapshots + coordinates
-├── Storage Layer   app/storage/   media library, SQLite (schema versioned)
-└── UI Layer        frontend/      Control-center web UI (AR/EN, RTL, offline)
+```
+✓ Camera connectivity      (OFFLINE → REACHABLE → CONTROL_READY)
+✓ HTTP control plane       (8888 — فحص + فتح واجهة الكاميرا)
+✓ FTP media access         (21 — قائمة DCIM: الاسم/التاريخ/الحجم/النوع)
+✓ Telnet camera control    (23 — جلسة تسجيل دخول كاملة ثم الأمر)
+✓ Take Photo               (st key click s2 → التحقق من ملف جديد → تنزيل)
+✓ SD media listing         (عرض/تنزيل/فتح — بدون تعديل أو حذف)
+✓ Download                 (إلى المعرض المحلي gallery/YYYY/MM/)
+✓ Local Gallery            (عرض/تكبير/تنزيل/فتح)
 ```
 
-Key design points:
+## المستقبلي (غير موجود حالياً — لا تدّعي أنه يعمل)
 
-- **Offline-first** — every core feature works without internet. No CDN, no
-  external fonts; the UI is served locally by the API server.
-- **Bounded memory** — the FrameBus keeps only the latest frame plus small
-  drop-oldest taps; a slow consumer can never grow RAM unbounded.
-- **Windows-first** — `setup.bat` / `run_gateway.bat`; FFmpeg can be bundled
-  in `runtime/ffmpeg/` (no PATH requirement).
-- **Secure defaults** — the server binds `127.0.0.1`; LAN access is an
-  explicit setting. No credentials are stored in git or logs.
-
----
-
-## 3. Installation (Windows 11)
-
-```bat
-1. Install Python 3.11+  (python.org, "Add to PATH" checked)
-2. Double-click  setup.bat
+```
+Future:  Live Preview · 360 Viewer · AI
 ```
 
-`setup.bat` creates `.venv`, installs dependencies, and checks FFmpeg.
+كل كود البث القديم محفوظ في `legacy/` ولا يستورده التطبيق الجديد إطلاقاً.
 
-### FFmpeg (needed for decoding + recording)
+---
 
-Any **one** of these works — the Hub auto-detects it:
+## لماذا هذا الإصدار؟
 
-1. **Bundled (recommended, fully offline):** download a Windows build from
-   <https://www.gyan.dev/ffmpeg/builds/> and put `ffmpeg.exe` (and
-   `ffprobe.exe`) inside `runtime\ffmpeg\`.
-2. **PATH:** install FFmpeg normally.
-3. **Custom path:** set it in the UI → Settings → FFmpeg (with a Test button).
+التحقيق الميداني (2026-09-04، `ROOT-CAUSE-MAP.md`) أثبت بمستوى LEVEL 0 أن
+مُبثّ الكاميرا الأصلي يعمل بآلية **"تسليح واحد = عميل واحد"**: العميل الأول
+يحصل على بث ممتاز، وكل عميل لاحق يحصل على رؤوس HTTP بدون جسم، والمحاولات
+المتكررة تُدخل الكاميرا في تعليق كامل يتطلب إعادة تشغيل فيزيائية.
 
-If FFmpeg is missing, the Hub still runs (demo mode, gallery, events) and
-recording/decoding show a clear warning instead of crashing.
+**القرار المعماري:** إيقاف مشروع Live Preview في هذا الإصدار، والاعتماد على
+الوظائف التي ثبت أنها تعمل فعلاً — مستوى التحكم (HTTP/FTP/Telnet) الذي يبقى
+حياً حتى أثناء تعليق البث.
 
-### Optional AI extras (face recognition)
+## البنية
 
-```bat
-.venv\Scripts\activate
-pip install -r requirements-ai.txt
+```
+app/
+    main.py                 تجميع FastAPI + بانر الإقلاع (CONTROL_ONLY)
+    stable/
+        settings.py         إعدادات JSON محلية (credentials خارج Git)
+        telnet.py           جلسة Telnet كاملة: login → password → shell
+        ftp.py              عميل FTP متوافق مع busybox (raw socket)
+        http.py             فحص + فتح واجهة الكاميرا 8888
+        control.py          CameraController: status/test/take-photo-command
+        camera.py           CameraService: آلة الحالة + سير عمل التصوير
+        media.py            MediaManager: بطاقة SD + المعرض المحلي
+        api.py              REST فقط (بلا WebSocket)
+frontend/                   واجهة جديدة: فاتحة، عربية RTL، إنجليزية LTR
+legacy/                     الكود السابق (stream/ai/diagnostics/...) — غير مستورد
+tests/stable/               14 اختباراً بمحاكاة (mocks) — انظر ملاحظة الأدلة
+tools/, diagnostics/, vendor/  أدوات التحقيق والمراجع — خارج مسار التشغيل
 ```
 
-Without it, everything else works; recognition simply reports "disabled".
+## التثبيت
 
----
+المتطلبات: Python 3.11+ فقط.
 
-## 4. Run
-
-```bat
-run_gateway.bat
+```bash
+python3 -m venv .venv && source .venv/bin/activate   # اختياري
+pip install -r requirements.txt                      # fastapi + uvicorn + requests
+python -m uvicorn app.main:app --host 127.0.0.1 --port 8765
+# أو: ./run.sh
 ```
 
-Then open: **http://127.0.0.1:8765/**
+ثم افتح `http://127.0.0.1:8765`. البرنامج لا يحتاج إنترنت — يحتاج فقط
+`حاسب + شبكة Wi-Fi الخاصة بالكاميرا`.
 
-| Script | Purpose |
-|---|---|
-| `setup.bat` | first-time installation |
-| `run_gateway.bat` | start the Hub (127.0.0.1 by default) |
-| `run_dev.bat` | development mode with auto-reload |
+## الاستخدام
 
-LAN access: Settings → Network → `network.lan_access`, then start with
-`set HUB_HOST=0.0.0.0` before `run_gateway.bat`.
+1. صل حاسبك بشبكة الكاميرا (Gear360 xxxx).
+2. افتح الواجهة — لوحة التحكم تعرض الحالة و✓/✕ لكل خدمة.
+3. **Test Camera** يفحص TCP + HTTP 8888 + FTP 21 + Telnet 23 (لا يلمس 7679).
+4. **فتح واجهة الكاميرا** يفتح واجهة الـmod الأصلية داخل الكاميرا.
+5. **التقاط صورة** ينفّذ سير العمل الكامل (أدناه).
+6. **الملفات** يعرض DCIM (عرض/تنزيل) و**المعرض المحلي** للملفات المنزّلة.
 
----
+### سير عمل التصوير
 
-## 5. Connect the camera
-
-1. Put the PC on the camera's Wi-Fi (the camera acts as an AP without
-   internet — this is fine, the Hub is offline-first).
-2. UI → **Camera** → *Test Connection* (TCP + HTTP probe with latency).
-3. UI → **Camera** → **Connect**. The state pill moves
-   `Connecting → Streaming` and the live preview starts.
-
-Connection settings (IP / port / path / auto-reconnect / health interval)
-live in **Settings → Camera** and the DB — nothing is hard-coded.
-
-> If the IP ever changes, edit it in Settings; the health probe re-checks
-> reachability every few seconds.
-
----
-
-## 6. Live 360 Viewer
-
-UI → **Live 360° Viewer**. The dual-fisheye preview is reprojected in WebGL:
-
-| Projection | Description |
-|---|---|
-| `Perspective` | look around (drag = pan/tilt, wheel = FOV zoom) |
-| `360° Equirectangular` | flat stitched 360 view |
-| `Fisheye` | single raw lens (front/back) |
-| `Tiny Planet` | stereographic "little planet" |
-| `Raw` | untouched camera frame |
-
-Also included: FOV slider, fullscreen, reset view, **lens calibration panel**
-(FOV / radius / offset / roll — stored in settings), snapshot button (saves
-the current projection), record/pause/stop, and **Virtual Cameras** — save any
-(yaw, pitch, FOV, projection) as a reusable preset, jump between them, and
-open recorded 360 videos in the same viewer (`#/live?recording=ID`).
-
----
-
-## 7. Demo Mode (no camera needed)
-
-Settings → System → **Demo Mode** (or `POST /api/system/demo?enabled=true`).
-
-The Hub generates a synthetic dual-fisheye scene (moving "people", grid
-sphere, timestamp) injected into the normal pipeline. Every surface shows a
-clear amber **DEMO MODE** badge; demo never mixes with live camera data. This
-is how you can develop/test the UI, gallery, events and AI without the device.
-
----
-
-## 8. AI Engine
-
-UI → **AI Engine**. Everything runs locally on CPU:
-
-| Module | Backend | Notes |
-|---|---|---|
-| Motion detection | frame-diff + contours | sensitivity / min-area / cooldown |
-| Person detection | OpenCV HOG (built-in) | YOLO backend ready via abstraction |
-| Face detection | OpenCV Haar (built-in) | independent from recognition |
-| Face recognition | `face_recognition` (optional) | 128-d embeddings in SQLite |
-| Tracking | centroid tracker | track ids, first/last seen, person-left |
-| AI Director | rule-based + hysteresis | picks best of 4 analysis views |
-| Attendance | optional module | check-in/out per person per day, cooldown |
-
-AI analyses **perspective views** reprojected from the 360 scene (yaw
-0°/90°/180°/270°) — detectors see rectilinear imagery, not fisheye. Detections
-and the director's best view stream live to the UI over WebSocket; events land
-in the timeline with snapshots and scene coordinates.
-
-> The detector abstraction (`app/ai/base.py`: `NullDetector` /
-> `OpenCVPersonDetector` / `YOLODetector`) makes swapping models a config
-> change, not a rewrite.
-
----
-
-## 9. Events, Gallery, People
-
-- **Events** — live timeline (`motion`, `person`, `face`, `recognition`,
-  `attendance`…), each with timestamp, confidence, snapshot, scene
-  coordinates, track/person references. Type filters + 24h stats.
-- **Gallery** — photos + recordings with thumbnails, type badges, favorites,
-  size/duration, disk usage; 360 videos open in the 360 viewer.
-- **Recordings** — management table (play in 360°, download, delete).
-- **People** — face database: name, ID, department, notes, photo upload,
-  embedding status, recognition counters.
-
-Storage layout (auto-organized, timestamped names):
-
-```text
-recordings/2026/09/02/01/2026-09-02_01-34-20.mp4
-photos/2026/09/02/2026-09-02_01-35-10_pano.jpg
-photos/events/...            (AI snapshots)
+```
+Hub → Telnet 23: login root → st key click s2
+    → انتظار كتابة الكاميرا للملف
+    → مسح FTP دوري هادئ (ملفان بين قيستين، retry ≤ 2 مع backoff)
+    → مقارنة هوية الملفات (path + size + mtime) قبل/بعد — لا اسماء فقط
+    → ملف جديد؟ تنزيله إلى gallery/YYYY/MM/ → PHOTO_READY
+    → لا ملف جديد؟ FAILED برسالة عربية واضحة — لا نجاح وهمي أبداً
 ```
 
----
+### الإعدادات
 
-## 10. Dashboard & health
+IP الكاميرا، المنافذ الثلاثة، بيانات FTP (افتراضي anonymous/فارغ حسب
+الـmod)، المهلات، أمر التصوير — كلها من شاشة الإعدادات وتُحفظ في
+`config/hub_settings.json` (مستثنى من Git — لا credentials في المستودع).
 
-The dashboard shows camera state, FPS/resolution, live preview, AI counters,
-storage KPIs, recent events and a **health matrix** (Camera / Stream / Decoder
-/ FFmpeg / AI / Storage / DB) with `OK / WARNING / ERROR / DISABLED` states.
-Logs are split per domain into `logs/app.log`, `camera.log`, `stream.log`,
-`decoder.log`, `ai.log`, `errors.log` (rotating) and mirrored for the UI.
-
----
-
-## 11. REST API & WebSocket
-
-Everything the UI does is available over HTTP (all local):
-
-```text
-GET  /api/camera/status        POST /api/camera/connect|disconnect|test
-GET  /api/stream/status        GET  /api/mjpeg            GET  /api/stream/frame.jpg
-GET  /api/stream/snapshot      POST /api/recording/start|stop|pause
-GET  /api/recordings           GET  /api/photos           GET  /api/gallery/stats
-GET  /api/events               GET  /api/events/timeline  GET  /api/attendance/summary
-GET  /api/people               POST /api/people           POST /api/people/{id}/photo
-GET  /api/ai/status            POST /api/ai/config
-GET  /api/settings             PUT  /api/settings
-GET  /api/system/health        GET  /api/system/info      GET  /api/system/logs
-GET  /api/vcameras             POST /api/vcameras
-WS   /api/ws                   (state, detections, events — live push)
-```
-
-Interactive docs: `http://127.0.0.1:8765/docs`
-
----
-
-## 12. Database
-
-SQLite at `data/gear360hub.db` (WAL mode) with schema versioning
-(`app/core/database.py` migrations): `settings`, `cameras`, `recordings`,
-`photos`, `events`, `people`, `face_embeddings`, `virtual_cameras`,
-`ai_sessions`, `system_logs`, `attendance`.
-
----
-
-## 13. Tests
+## الاختبارات
 
 ```bash
 pip install -r requirements-dev.txt
-pytest tests/ -q
+python -m pytest tests/stable/ -q          # 14 اختباراً (mocks)
 ```
 
-26 tests including a **golden pipeline test**: real H.264 access units
-generated by FFmpeg are wrapped in the exact Gear360 container byte layout,
-then run through parser → decoder → frames. Parser atomicity (any chunk
-boundary), resync, header fields, projections round-trip, settings, API,
-recording lifecycle and motion/tracker/director units are covered.
+مغطاة: آلة الحالة، فحص HTTP، اتصال FTP وتحليل قوائم busybox، تسلسل تسجيل
+دخول Telnet، سير عمل التصوير الكامل (نجاح/فشل/عدم اتصال)، قائمة الوسائط
+بالأنواع (JPG/MP4/Other)، التنزيل إلى المعرض، رفض مسارات الاجتياز.
 
----
+> **ملاحظة صادقة:** نجاح هذه الاختبارات يثبت منطق الـHub فقط. **الإثبات
+> النهائي هو الكاميرا الفعلية** عبر اختبارات القبول الستة أدناه.
 
-## 14. Development
+## اختبارات القبول النهائية (على الجهاز الحقيقي)
 
-```bash
-python -m uvicorn app.main:app --host 127.0.0.1 --port 8765 --reload
-```
+| # | الاختبار | معيار النجاح |
+|---|---|---|
+| 1 | الكاميرا متصلة | الواجهة تعرض **CONTROL_READY** |
+| 2 | Open Camera Web | يفتح `192.168.43.1:8888` |
+| 3 | Take Photo | الكاميرا تلتقط صورة حقيقية |
+| 4 | FTP | الصورة الجديدة تظهر |
+| 5 | Download | الصورة تنتقل إلى الكمبيوتر |
+| 6 | Gallery | الصورة تظهر في المعرض المحلي |
 
-```text
-360_attande/
-├── app/                  backend (FastAPI)
-│   ├── api/  camera/  stream/  media/  ai/  events/  storage/  core/  services/
-│   ├── hub.py            orchestrator (wires all layers + WebSocket)
-│   └── main.py           app assembly
-├── frontend/             offline web UI (vanilla ES modules + WebGL)
-│   ├── js/views/         dashboard, live, gallery, recordings, events,
-│   │                     ai, people, camera, settings
-│   └── js/gl360.js       dual-fisheye 360 WebGL renderer
-├── config/               camera profiles
-├── data/ recordings/ photos/ logs/ runtime/   (gitignored, created at runtime)
-├── tests/                pytest suite + synthetic stream fixtures
-├── setup.bat  run_gateway.bat  run_dev.bat  run.sh
-└── requirements*.txt
-```
+## الأمان والسلامة
 
-Frontend/backend share the projection math: `app/media/projections.py`
-(server, for AI + snapshots) mirrors `frontend/js/gl360.js` (client, for
-real-time display) — same conventions, verified by round-trip tests.
+* الربط الافتراضي `127.0.0.1` (لا `0.0.0.0` إلا بخيار صريح).
+* لا تعديل على Firmware — لا flash، لا قتل عمليات، لا لمس 7679 إطلاقاً.
+* إعادة المحاولة ≤ 2 مع backoff — لا حلقات هجومية على الكاميرا.
+* بيانات FTP لا تُخزّن في Git ولا تُعاد للواجهة بعد الحفظ.
 
----
+## القيود المعروفة
 
-## 15. Troubleshooting
+* واجهة الكاميرا (فتح/عرض الملفات داخل الكاميرا) تعمل فقط من متصفح موجود
+  على شبكة الكاميرا.
+* تصفح الوسائط للقراءة فقط — لا حذف في هذا الإصدار (عمداً).
+* فيديو MP4 يُعرض/يُنزّل كما هو — لا تحويل ولا تفسير.
+* Take Photo يتطلب أن تكون الكاميرا في وضع يقبل أمر الزر (ليس المعاينة).
 
-| Symptom | Fix |
-|---|---|
-| "FFmpeg not found" | bundle `runtime\ffmpeg\ffmpeg.exe` or install in PATH; test in Settings |
-| Camera unreachable | PC must be on the camera Wi-Fi; check IP in Settings; use *Test Connection* |
-| Connect stays "connecting" | camera preview stops when battery is low / menu open on camera |
-| Recording disabled | FFmpeg missing or no frames flowing (connect camera or enable demo) |
-| Recognition disabled | `pip install -r requirements-ai.txt` |
-| Port already in use | `set HUB_PORT=8800` then run `run_gateway.bat` |
+## التاريخ البرمجي
 
----
-
-## 16. Roadmap
-
-- [x] Phase 1–8: camera, stream, decoder, 360 viewer, recording, gallery,
-      events, motion, person/face detection, tracking, virtual cameras
-- [x] Phase 9–10: AI Director, attendance module (MVP)
-- [ ] RTSP / WebRTC output from the decoded pipeline
-- [ ] Two-click stitched 360 video export (server-side render)
-- [ ] YOLO person backend packaging + GPU auto-detection
-- [ ] Multi-camera hub (profiles already support it)
-- [ ] Timeline scrubber with event markers over recordings
-
----
-
-## 17. Security notes
-
-- Binds `127.0.0.1` by default; LAN access is an explicit opt-in setting.
-- No secrets, tokens, Wi-Fi passwords or personal media ever enter git
-  (see `.gitignore`: `data/`, `recordings/`, `photos/`, `logs/`, `.env`).
-- Face embeddings are stored locally only; photo storage per person is
-  optional.
+كل كود البث والتحقيق السابق محفوظ في `legacy/` وفي git history. التقرير
+الكامل لتحقيق الجذر: `ROOT-CAUSE-MAP.md` + `INVESTIGATION-REPORT.md`.

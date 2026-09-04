@@ -49,3 +49,7 @@ reference/
 
 # third-party reference sources (study-only, never committed)
 vendor/
+
+# Stable Edition: local settings (may contain FTP credentials — §28) + gallery
+config/hub_settings.json
+gallery/

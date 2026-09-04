@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gear360 Hub</title>
+<link rel="icon" href="/static/assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/static/css/app.css">
+</head>
+<body>
+<div id="app" class="app">
+  <aside class="sidebar" id="sidebar">
+    <div class="brand">
+      <div class="brand-logo">360</div>
+      <div class="brand-text"><strong>Gear360 Hub</strong><span data-i18n="app.tagline">منصة ذكية مفتوحة</span></div>
+    </div>
+    <nav class="nav" id="nav" aria-label="main navigation"></nav>
+    <div class="sidebar-foot">
+      <div class="mode-badge" id="modeBadge" hidden>DEMO</div>
+      <div class="version" id="verBadge" title="commit">v1.2.0</div>
+    </div>
+  </aside>
+
+  <div class="main">
+    <header class="topbar">
+      <button class="icon-btn menu-toggle" id="menuToggle" aria-label="menu">☰</button>
+      <div class="cam-pill" id="camPill"><span class="dot" id="camDot"></span><span id="camText">—</span></div>
+      <div class="topbar-stats" id="topStats" hidden>
+        <span class="stat"><b id="stFps">0</b> FPS</span>
+        <span class="stat" id="stRes">—</span>
+      </div>
+      <span class="rec-badge" id="recBadge" hidden>● <span data-i18n="rec.badge">تسجيل</span> <b id="recTime">00:00</b></span>
+      <div class="spacer"></div>
+      <button class="icon-btn" id="langToggle" title="Language">EN</button>
+      <div class="clock" id="clock">--:--</div>
+    </header>
+    <main class="view" id="view" tabindex="-1"></main>
+  </div>
+</div>
+
+<div id="toasts" class="toasts" aria-live="polite"></div>
+<div id="modalRoot"></div>
+
+<script type="module" src="/static/js/app.js"></script>
+</body>
+</html>

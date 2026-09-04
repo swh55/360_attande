@@ -1,4 +1,5 @@
-"""Gear360 Hub — Smart Open Platform for Samsung Gear 360 (SM-R210)."""
+"""Gear360 Hub — Stable Edition.
 
-__version__ = "1.0.0"
-APP_NAME = "Gear360 Hub"
+Control-plane only: HTTP 8888 + FTP 21 + Telnet 23.
+The live stream (port 7679) is NOT used anywhere in this edition.
+"""
